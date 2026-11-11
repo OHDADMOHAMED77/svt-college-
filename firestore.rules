@@ -1,0 +1,101 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == "ohdadmohamed77@gmail.com" ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isTeacher() {
+      return isSignedIn() && (
+        isAdmin() ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "teacher")
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Users Collection
+    match /users/{userId} {
+      allow read: if isSignedIn() && (isOwner(userId) || isAdmin() || isTeacher());
+      allow create: if isSignedIn() && isOwner(userId) &&
+        request.resource.data.uid == userId &&
+        request.resource.data.email is string &&
+        request.resource.data.role in ['admin', 'teacher', 'student'];
+      allow update: if isSignedIn() && (
+        isAdmin() ||
+        (isOwner(userId) &&
+         request.resource.data.uid == userId &&
+         // Students cannot elevate their own role or subscription without admin/system
+         request.resource.data.role == resource.data.role)
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Admins Collection (role lookup)
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // Lessons Collection (1AC, 2AC, 3AC SVT Lessons)
+    match /lessons/{lessonId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isAdmin() || isTeacher();
+    }
+
+    // Quizzes & Exercises Collection
+    match /quizzes/{quizId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isAdmin() || isTeacher();
+    }
+
+    // Quiz Results / Submissions
+    match /results/{resultId} {
+      allow read: if isSignedIn() && (
+        resource.data.studentId == request.auth.uid ||
+        isAdmin() ||
+        isTeacher()
+      );
+      allow create: if isSignedIn() &&
+        request.resource.data.studentId == request.auth.uid;
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Classes Collection (Teacher Managed)
+    match /classes/{classId} {
+      allow read: if isSignedIn();
+      allow create: if isTeacher() && request.resource.data.teacherId == request.auth.uid;
+      allow update: if isTeacher() && (resource.data.teacherId == request.auth.uid || isAdmin());
+      allow delete: if isTeacher() && (resource.data.teacherId == request.auth.uid || isAdmin());
+    }
+
+    // Payments / Subscriptions Validation Queue
+    match /payments/{paymentId} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+  }
+}
