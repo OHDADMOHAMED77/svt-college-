@@ -2,5 +2,7 @@
   "name": "SVT COLLÈGE PRO",
   "description": "Plateforme éducative professionnelle pour l'enseignement et l'apprentissage des Sciences de la Vie et de la Terre au collège marocain (1AC, 2AC, 3AC).",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

@@ -1,4 +1,5 @@
-import express, { Request, Response } from 'express';
+import express from 'express';
+import type { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -10,9 +11,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = '0.0.0.0';
 
 app.use(express.json({ limit: '5mb' }));
+
+// Cloud Healthcheck endpoint for Cloud Run and load balancers
+app.get('/healthz', (_req, res) => {
+  res.status(200).send('OK');
+});
 
 // Dedicated SVT Pedagogical Gemini AI Endpoint
 app.post('/api/gemini', async (req: Request, res: Response) => {
@@ -159,7 +166,10 @@ N'hésite pas à explorer notre **Laboratoire Virtuel** pour manipuler cette exp
 
 // Development or Production Server
 async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
+  const isProduction = process.env.NODE_ENV === 'production';
+  const distPath = path.resolve(process.cwd(), 'dist');
+
+  if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -167,14 +177,39 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path.resolve(__dirname, 'dist')));
+    app.use(express.static(distPath));
     app.get('*', (_req, res) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+      res.sendFile(path.resolve(distPath, 'index.html'));
     });
   }
 
-  app.listen(PORT, () => {
-    console.log(`SVT COLLÈGE PRO server running on port ${PORT}`);
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`SVT COLLÈGE PRO server running on http://${HOST}:${PORT} (NODE_ENV=${process.env.NODE_ENV || 'development'})`);
+  });
+
+  // Graceful shutdown on Cloud Run container stop
+  process.on('SIGTERM', () => {
+    console.log('SIGTERM signal received: closing server');
+    server.close(() => {
+      console.log('Server closed');
+      process.exit(0);
+    });
+  });
+
+  process.on('SIGINT', () => {
+    console.log('SIGINT signal received: closing server');
+    server.close(() => {
+      console.log('Server closed');
+      process.exit(0);
+    });
+  });
+
+  process.on('uncaughtException', (err) => {
+    console.error('Uncaught Exception logged:', err);
+  });
+
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
   });
 }
 
