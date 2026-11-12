@@ -154,7 +154,6 @@ export const MOROCCAN_SVT_LESSONS: Lesson[] = [
     status: 'published',
     isPremium: false,
     estimatedMinutes: 20,
-    linkedQuizId: 'quiz_1ac_respiration',
     linkedExperimentId: 'exp_respiration'
   },
 
@@ -289,8 +288,7 @@ export const MOROCCAN_SVT_LESSONS: Lesson[] = [
     diagrams: [],
     status: 'published',
     isPremium: false,
-    estimatedMinutes: 25,
-    linkedQuizId: 'quiz_2ac_seismes'
+    estimatedMinutes: 25
   },
 
   // ==================== 3AC ====================
@@ -439,7 +437,6 @@ export const MOROCCAN_SVT_LESSONS: Lesson[] = [
     status: 'published',
     isPremium: false,
     estimatedMinutes: 30,
-    linkedQuizId: 'quiz_3ac_nerveux',
     linkedExperimentId: 'exp_reflex_arc'
   }
 ];
@@ -609,8 +606,8 @@ export const MOROCCAN_SVT_QUIZZES: Quiz[] = [
           'سرعة الموجات الزلزالية'
         ],
         correctAnswer: 1,
-        explanation: 'Des animaux terrestres incapables de traverser l\'océan Atlantique ont été retrouvés sous forme fossile en Afrique et Amérique du Sud.',
-        explanationAr: 'عُثر على مستحاثات كائنات قارية لا تقوى على السباحة عبر المحيط في إفريقيا وأمريكا الجنوبية معاً.',
+        explanation: 'Des reptiles d\'eau douce (Mesosaurus), incapables de traverser l\'océan Atlantique, ont été retrouvés sous forme fossile en Afrique et en Amérique du Sud.',
+        explanationAr: 'عُثر على مستحاثات زواحف تعيش في المياه العذبة، لا تستطيع عبور المحيط، في إفريقيا وأمريكا الجنوبية معاً.',
         points: 5
       }
     ]
@@ -665,7 +662,7 @@ export const MOROCCAN_SVT_QUIZZES: Quiz[] = [
           'الغلوكوز',
           'الأحماض الأمينية',
           'الأحماض الدهنية',
-          'الغلایکوجين'
+          'الغليكوجين'
         ],
         correctAnswer: 1,
         explanation: 'Les protéines sont des polymères d\'acides aminés qui sont libérés lors de la digestion.',
