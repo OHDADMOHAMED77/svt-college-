@@ -4,7 +4,8 @@ import {
   Search, Filter, Save, X, BookOpen, AlertCircle, ArrowLeft,
   Sparkles, Layers, ListPlus, ShieldCheck, Download, Upload,
   Image, Video, FileDown, CheckSquare, HelpCircle, EyeOff,
-  FolderTree, Calendar, Lock, Unlock, Database
+  FolderTree, Calendar, Lock, Unlock, Database, Loader2,
+  AlertTriangle, FileUp
 } from 'lucide-react';
 import { Lesson, GradeLevel, Definition, ScientificDiagram, MediaAttachment, QuizQuestion } from '../types/svt';
 
@@ -102,6 +103,13 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
   const [isEditingExisting, setIsEditingExisting] = useState(false);
   const [saveNotification, setSaveNotification] = useState<string | null>(null);
 
+  // Smart PDF Import State
+  const [isPdfImportModalOpen, setIsPdfImportModalOpen] = useState(false);
+  const [isAnalyzingPdf, setIsAnalyzingPdf] = useState(false);
+  const [pdfAnalysisNotice, setPdfAnalysisNotice] = useState<string | null>(null);
+  const [pdfScannedWarning, setPdfScannedWarning] = useState(false);
+  const [pdfImportProgress, setPdfImportProgress] = useState(0);
+
   // Filter lessons
   const filteredLessons = lessons.filter(lesson => {
     if (selectedGrade !== 'all' && lesson.gradeLevel !== selectedGrade) return false;
@@ -127,6 +135,8 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
       semester: selectedSemester === 'all' ? 1 : Number(selectedSemester) as 1 | 2
     });
     setIsEditingExisting(false);
+    setPdfAnalysisNotice(null);
+    setPdfScannedWarning(false);
     setActiveTab('info');
     setIsEditorOpen(true);
   };
@@ -134,25 +144,155 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
   const handleOpenEdit = (lesson: Lesson) => {
     setFormData(JSON.parse(JSON.stringify(lesson)));
     setIsEditingExisting(true);
+    setPdfAnalysisNotice(null);
+    setPdfScannedWarning(false);
     setActiveTab('info');
     setIsEditorOpen(true);
   };
 
-  const handleSave = () => {
+  const handleSave = (forcedStatus?: 'published' | 'draft' | 'archived') => {
     if (!formData.title.trim()) {
-      alert(isAr ? 'يرجى إدخال عنوان الدرس' : 'Veuillez saisir au moins le titre du cours en français.');
+      alert(
+        isAr
+          ? 'يرجى إدخال عنوان الدرس باللغة الفرنسية (مطلوب قبل الحفظ)'
+          : 'Veuillez saisir au moins le titre du cours en français (requis avant enregistrement).'
+      );
+      setActiveTab('info');
       return;
     }
-    onSaveLesson(formData);
+
+    const finalStatus = forcedStatus || formData.status || 'published';
+    const lessonToSave: Lesson = {
+      ...formData,
+      status: finalStatus
+    };
+
+    onSaveLesson(lessonToSave);
+
+    const isDraft = finalStatus === 'draft';
     setSaveNotification(
       isAr
-        ? 'تم حفظ الدرس ونشره بنجاح في قاعدة البيانات وفي فضاء التلاميذ!'
-        : 'Cours enregistré avec succès et synchronisé en temps réel dans l\'espace élèves !'
+        ? isDraft
+          ? 'تم حفظ الدرس كمسودة بنجاح (غير مرئي للتلاميذ حتى يتم نشره)!'
+          : 'تم حفظ ونشر الدرس بنجاح في قاعدة البيانات وفي فضاء التلاميذ!'
+        : isDraft
+          ? 'Cours enregistré en tant que brouillon (non visible aux élèves tant qu\'il n\'est pas publié).'
+          : 'Cours enregistré avec succès et synchronisé en temps réel dans l\'espace élèves !'
     );
     setTimeout(() => {
       setSaveNotification(null);
       setIsEditorOpen(false);
+      setPdfAnalysisNotice(null);
+      setPdfScannedWarning(false);
     }, 1300);
+  };
+
+  // Smart PDF Course Import
+  const handleSmartPdfImport = async (file: File) => {
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf') {
+      alert(isAr ? 'يرجى اختيار ملف بصيغة PDF فقط' : 'Veuillez sélectionner un fichier au format PDF uniquement.');
+      return;
+    }
+
+    if (file.size > 40 * 1024 * 1024) {
+      alert(isAr ? 'حجم الملف كبير جداً (الحد الأقصى 40 ميغابايت)' : 'Le fichier dépasse la taille maximale autorisée (40 Mo).');
+      return;
+    }
+
+    setIsAnalyzingPdf(true);
+    setPdfImportProgress(25);
+
+    try {
+      const base64Data = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      setPdfImportProgress(55);
+
+      const response = await fetch('/api/parse-pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pdfBase64: base64Data,
+          filename: file.name
+        })
+      });
+
+      setPdfImportProgress(85);
+
+      if (!response.ok) {
+        throw new Error(`Erreur serveur (${response.status})`);
+      }
+
+      const result = await response.json();
+      setPdfImportProgress(100);
+
+      const pdfAttachment: MediaAttachment = {
+        id: `med_pdf_${Date.now()}`,
+        type: 'pdf',
+        title: file.name.replace(/\.[^/.]+$/, ''),
+        titleAr: file.name.replace(/\.[^/.]+$/, ''),
+        url: base64Data,
+        description: `Document PDF officiel (${(file.size / (1024 * 1024)).toFixed(2)} Mo)`
+      };
+
+      const extracted = result.extracted || {};
+      const isScanned = Boolean(result.isScanned || !result.hasText || !extracted.title?.trim());
+
+      setPdfScannedWarning(isScanned);
+
+      const newLessonData: Lesson = {
+        ...emptyLesson,
+        id: `lesson_${Date.now()}`,
+        gradeLevel: (extracted.gradeLevel as GradeLevel) || '3AC',
+        semester: (extracted.semester as (1 | 2)) || 1,
+        themeTitle: extracted.themeTitle || emptyLesson.themeTitle,
+        themeTitleAr: extracted.themeTitleAr || emptyLesson.themeTitleAr,
+        chapterTitle: extracted.chapterTitle || emptyLesson.chapterTitle,
+        chapterTitleAr: extracted.chapterTitleAr || emptyLesson.chapterTitleAr,
+        title: isScanned ? '' : (extracted.title || ''),
+        titleAr: isScanned ? '' : (extracted.titleAr || extracted.title || ''),
+        summary: extracted.summary || (isScanned ? '' : 'Synthèse pédagogique du document PDF importé.'),
+        summaryAr: extracted.summaryAr || (isScanned ? '' : 'خلاصة بيداغوجية للوثيقة المستوردة.'),
+        objectives: Array.isArray(extracted.objectives) && extracted.objectives.length > 0 ? extracted.objectives : emptyLesson.objectives,
+        objectivesAr: Array.isArray(extracted.objectivesAr) && extracted.objectivesAr.length > 0 ? extracted.objectivesAr : emptyLesson.objectivesAr,
+        mediaAttachments: [pdfAttachment],
+        status: 'draft', // CRITICAL: ALWAYS draft so admin validates first before publishing!
+        isPremium: false,
+        estimatedMinutes: 30
+      };
+
+      setFormData(newLessonData);
+      setIsEditingExisting(false);
+
+      if (isScanned) {
+        setPdfAnalysisNotice(
+          isAr
+            ? '⚠️ تم استيراد وثيقة PDF ولكنها ممسوحة ضوئياً (بدون نص رقمي قابل للاستخراج). تم إرفاق الملف الأصلي للتنزيل بنجاح. يرجى إدخال عنوان الدرس ومعلومات الوحدة يدوياً أدناه قبل الحفظ.'
+            : '⚠️ Document PDF scanné : Aucun texte numérique extrait. Le fichier PDF est attaché pour le téléchargement. Veuillez saisir manuellement le titre du cours et vérifier les informations ci-dessous.'
+        );
+      } else {
+        setPdfAnalysisNotice(
+          isAr
+            ? `✓ تم استيراد وتحليل الدرس بنجاح: "${extracted.title}" (المستوى: ${extracted.gradeLevel}، الدورة: ${extracted.semester}). تم إعداده كمسودة للمراجعة والتعديل قبل النشر.`
+            : `✓ Extraction intelligente réussie : Titre "${extracted.title}" détecté (${extracted.gradeLevel}, Semestre ${extracted.semester}). Le cours est ouvert en mode brouillon pour validation avant publication.`
+        );
+      }
+
+      setIsPdfImportModalOpen(false);
+      setActiveTab('info');
+      setIsEditorOpen(true);
+    } catch (err: any) {
+      console.error('Erreur import PDF:', err);
+      alert(isAr ? 'حدث خطأ أثناء معالجة ملف PDF. يرجى التأكد من سلامة الملف.' : `Échec de l'analyse automatique du PDF : ${err.message || 'Erreur'}.`);
+    } finally {
+      setIsAnalyzingPdf(false);
+      setPdfImportProgress(0);
+    }
   };
 
   // Add / Remove Handlers for Dynamic Arrays
@@ -238,7 +378,7 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       const result = reader.result as string;
       const newMedia: MediaAttachment = {
         id: `med_${Date.now()}`,
@@ -252,6 +392,42 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
         ...prev,
         mediaAttachments: [...(prev.mediaAttachments || []), newMedia]
       }));
+
+      // If PDF and title is empty, trigger smart auto-fill
+      if (type === 'pdf' && !formData.title.trim()) {
+        try {
+          const res = await fetch('/api/parse-pdf', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pdfBase64: result, filename: file.name })
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data.extracted?.title) {
+              setFormData(prev => ({
+                ...prev,
+                title: prev.title || data.extracted.title,
+                titleAr: prev.titleAr || data.extracted.titleAr || data.extracted.title,
+                gradeLevel: prev.gradeLevel || data.extracted.gradeLevel || '3AC',
+                semester: prev.semester || data.extracted.semester || 1,
+                themeTitle: prev.themeTitle || data.extracted.themeTitle,
+                themeTitleAr: prev.themeTitleAr || data.extracted.themeTitleAr,
+                chapterTitle: prev.chapterTitle || data.extracted.chapterTitle,
+                chapterTitleAr: prev.chapterTitleAr || data.extracted.chapterTitleAr,
+                summary: prev.summary || data.extracted.summary,
+                summaryAr: prev.summaryAr || data.extracted.summaryAr
+              }));
+              setPdfAnalysisNotice(
+                isAr
+                  ? `✓ تم تحديد عنوان الدرس تلقائياً من ملف الـ PDF: "${data.extracted.title}"`
+                  : `✓ Titre détecté automatiquement depuis le document PDF : "${data.extracted.title}"`
+              );
+            }
+          }
+        } catch (err) {
+          console.warn('Auto-extract title silent fallback:', err);
+        }
+      }
     };
     reader.readAsDataURL(file);
   };
@@ -309,7 +485,15 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              onClick={() => setIsPdfImportModalOpen(true)}
+              className="px-4 py-3 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-700 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-sm shadow-lg shadow-blue-500/25 flex items-center gap-2 transition-all hover:scale-[1.02] active:scale-[0.98]"
+            >
+              <FileUp className="w-5 h-5" />
+              {isAr ? '📥 استيراد ذكي لدرس PDF' : '📥 Importer Cours PDF'}
+            </button>
+
             <button
               onClick={handleOpenCreate}
               className="px-5 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-sm shadow-lg shadow-emerald-500/25 flex items-center gap-2 transition-all hover:scale-[1.02] active:scale-[0.98]"
@@ -511,6 +695,33 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
               <div className="bg-emerald-500/20 border-b border-emerald-500/40 text-emerald-300 px-6 py-2.5 text-xs font-semibold flex items-center gap-2">
                 <CheckCircle className="w-4 h-4 text-emerald-400" />
                 {saveNotification}
+              </div>
+            )}
+
+            {/* Smart PDF Import Analysis Notification */}
+            {pdfAnalysisNotice && (
+              <div
+                className={`border-b px-6 py-3 text-xs font-semibold flex items-start sm:items-center justify-between gap-3 ${
+                  pdfScannedWarning
+                    ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                    : 'bg-blue-500/15 border-blue-500/40 text-blue-200'
+                }`}
+              >
+                <div className="flex items-center gap-2.5">
+                  {pdfScannedWarning ? (
+                    <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
+                  ) : (
+                    <Sparkles className="w-5 h-5 text-blue-400 shrink-0" />
+                  )}
+                  <span>{pdfAnalysisNotice}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setPdfAnalysisNotice(null)}
+                  className="p-1 hover:bg-slate-800/60 rounded text-slate-400 hover:text-white shrink-0"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
             )}
 
@@ -1255,7 +1466,7 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
             </div>
 
             {/* Modal Footer Controls */}
-            <div className="px-6 py-4 border-t border-slate-800 bg-slate-950 flex items-center justify-between shrink-0">
+            <div className="px-6 py-4 border-t border-slate-800 bg-slate-950 flex flex-wrap items-center justify-between gap-3 shrink-0">
               <button
                 type="button"
                 onClick={() => setIsEditorOpen(false)}
@@ -1264,11 +1475,11 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
                 {isAr ? 'إلغاء' : 'Annuler'}
               </button>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={() => onPreviewLesson(formData)}
-                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
+                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
                 >
                   <Eye className="w-4 h-4" />
                   {isAr ? 'معاينة' : 'Aperçu'}
@@ -1276,13 +1487,157 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
 
                 <button
                   type="button"
-                  onClick={handleSave}
+                  onClick={() => handleSave('draft')}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 text-xs font-bold inline-flex items-center gap-1.5 transition-all"
+                  title="Enregistrer en tant que brouillon (non visible aux élèves)"
+                >
+                  <FileText className="w-4 h-4 text-amber-400" />
+                  {isAr ? 'حفظ كمسودة' : 'Enregistrer brouillon'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleSave('published')}
                   className="px-5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-black shadow-lg shadow-emerald-500/25 inline-flex items-center gap-1.5 transition-all hover:scale-[1.02] active:scale-[0.98]"
+                  title="Valider et publier immédiatement dans l'espace élèves"
                 >
                   <Save className="w-4 h-4" />
-                  {isAr ? 'حفظ ونشر فورياً' : 'Enregistrer & Publier'}
+                  {isAr ? 'حفظ ونشر للتلاميذ' : 'Enregistrer & Publier'}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================== SMART PDF IMPORT MODAL ==================== */}
+      {isPdfImportModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            {/* Modal Header */}
+            <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/80">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-blue-500/20 text-blue-400 flex items-center justify-center font-bold">
+                  <FileUp className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white">
+                    {isAr ? 'استيراد ذكي لدرس SVT من ملف PDF' : 'Importation Intelligente de Cours PDF'}
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    {isAr ? 'استخراج تلقائي للعنوان والمستوى والتنظيم المغربي' : 'Détection automatique du titre, niveau (1AC, 2AC, 3AC) et semestre'}
+                  </p>
+                </div>
+              </div>
+
+              {!isAnalyzingPdf && (
+                <button
+                  onClick={() => setIsPdfImportModalOpen(false)}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              )}
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 space-y-5">
+              {isAnalyzingPdf ? (
+                <div className="py-8 text-center space-y-4">
+                  <div className="relative w-16 h-16 mx-auto">
+                    <Loader2 className="w-16 h-16 text-blue-500 animate-spin" />
+                    <Sparkles className="w-6 h-6 text-amber-400 absolute inset-0 m-auto animate-pulse" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-white">
+                      {isAr ? 'جاري تحليل الوثيقة واستخراج المعلومات البيداغوجية...' : 'Analyse pédagogique du document PDF en cours...'}
+                    </h4>
+                    <p className="text-xs text-slate-400 mt-1">
+                      {isAr ? 'التعرف على المقرر الدراسي المغربي، المستوى، وعنوان الدرس' : 'Reconnaissance du programme SVT marocain, du niveau et du titre du cours'}
+                    </p>
+                  </div>
+
+                  {/* Progress Bar */}
+                  <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden border border-slate-700 max-w-xs mx-auto">
+                    <div
+                      className="bg-gradient-to-r from-blue-500 to-emerald-400 h-full transition-all duration-300"
+                      style={{ width: `${pdfImportProgress}%` }}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {/* File Drop Area */}
+                  <label className="block border-2 border-dashed border-slate-700 hover:border-blue-500/80 rounded-2xl p-8 text-center cursor-pointer transition-all bg-slate-800/40 hover:bg-blue-500/5 group">
+                    <div className="w-14 h-14 rounded-2xl bg-blue-500/10 text-blue-400 group-hover:scale-110 flex items-center justify-center mx-auto mb-3 transition-transform border border-blue-500/20">
+                      <FileUp className="w-7 h-7" />
+                    </div>
+                    <span className="text-sm font-bold text-white block">
+                      {isAr ? 'انقر لاختيار ملف PDF أو اسحبه إلى هنا' : 'Cliquez pour sélectionner un PDF ou glissez-le ici'}
+                    </span>
+                    <span className="text-xs text-slate-400 block mt-1">
+                      {isAr ? 'يدعم وثائق الدروس الرسمية حتى 40 ميغابايت' : 'Fiches de cours, manuels ou résumés SVT jusqu\'à 40 Mo'}
+                    </span>
+                    <input
+                      type="file"
+                      accept="application/pdf,.pdf"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) handleSmartPdfImport(file);
+                      }}
+                    />
+                  </label>
+
+                  {/* Feature Highlights */}
+                  <div className="bg-slate-800/60 rounded-xl p-4 border border-slate-700/80 space-y-2.5 text-xs text-slate-300">
+                    <div className="flex items-start gap-2">
+                      <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                      <span>
+                        {isAr
+                          ? 'استخراج آلي لعنوان الدرس بالفرنسية مع اقتراح المستوى (1AC أو 2AC أو 3AC) والدورة والوحدة.'
+                          : 'Extraction automatique du titre en français, du niveau (1AC, 2AC ou 3AC), de l\'unité et du semestre.'}
+                      </span>
+                    </div>
+                    <div className="flex items-start gap-2">
+                      <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                      <span>
+                        {isAr
+                          ? 'فتح الدرس فورياً كمسودة لتتمكن من مراجعة وتعديل كافة المعلومات قبل النشر النهائي.'
+                          : 'Ouverture immédiate en tant que brouillon : vous gardez le contrôle total et vérifiez tout avant publication.'}
+                      </span>
+                    </div>
+                    <div className="flex items-start gap-2">
+                      <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                      <span>
+                        {isAr
+                          ? 'حفظ ملف الـ PDF الأصلي ليكون متاحاً لتنزيل التلاميذ وقراءته بجودة عالية.'
+                          : 'Conservation du PDF original dans les pièces jointes pour téléchargement direct par les élèves.'}
+                      </span>
+                    </div>
+                    <div className="flex items-start gap-2 text-amber-300/90">
+                      <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                      <span>
+                        {isAr
+                          ? 'الوثائق الممسوحة ضوئياً (Scannées) مدعومة بالكامل، مع إمكانية إدخال العنوان يدوياً بسهولة.'
+                          : 'Les PDF scannés sont acceptés : vous saisissez simplement le titre à la main sans blocage.'}
+                      </span>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-6 py-3 border-t border-slate-800 bg-slate-950 flex items-center justify-end">
+              <button
+                type="button"
+                disabled={isAnalyzingPdf}
+                onClick={() => setIsPdfImportModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold disabled:opacity-50"
+              >
+                {isAr ? 'إغلاق' : 'Fermer'}
+              </button>
             </div>
           </div>
         </div>

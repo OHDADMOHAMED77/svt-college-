@@ -31,8 +31,8 @@ export const CourseExplorer: React.FC<CourseExplorerProps> = ({
 
   const visibleLessons = lessons.filter(l => {
     if (l.gradeLevel !== gradeLevel) return false;
-    // Hide archived from student view
-    if (l.status === 'archived') return false;
+    // Hide archived and draft lessons from student view (only published lessons appear)
+    if (l.status === 'archived' || l.status === 'draft') return false;
     if (semesterFilter !== 'all' && String(l.semester || 1) !== semesterFilter) return false;
     if (search.trim()) {
       const q = search.toLowerCase();

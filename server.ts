@@ -3,7 +3,11 @@ import type { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 import { GoogleGenAI } from '@google/genai';
+
+const require = createRequire(import.meta.url);
+const pdfParse = require('pdf-parse');
 
 dotenv.config();
 
@@ -14,12 +18,216 @@ const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = '0.0.0.0';
 
-app.use(express.json({ limit: '5mb' }));
+// Allow up to 50MB for rich PDF uploads
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Cloud Healthcheck endpoint for Cloud Run and load balancers
 app.get('/healthz', (_req, res) => {
   res.status(200).send('OK');
 });
+
+// Intelligent PDF Course Extraction Endpoint
+app.post('/api/parse-pdf', async (req: Request, res: Response) => {
+  try {
+    const { pdfBase64, filename } = req.body;
+
+    if (!pdfBase64) {
+      return res.status(400).json({ error: 'Fichier PDF manquant (base64 requis).' });
+    }
+
+    const cleanBase64 = String(pdfBase64).replace(/^data:application\/pdf;base64,/, '');
+    const buffer = Buffer.from(cleanBase64, 'base64');
+
+    let pdfData: any = { text: '', numpages: 1, info: {} };
+    try {
+      pdfData = await pdfParse(buffer);
+    } catch (parseErr: any) {
+      console.warn('PDF parse warning, processing as scanned document:', parseErr?.message);
+    }
+
+    const rawText = (pdfData.text || '').trim();
+    const isScanned = rawText.length < 40;
+
+    // Analyze using Moroccan SVT curriculum heuristics
+    const analysis = analyzeSvtPdfContent(rawText, filename || 'cours.pdf', pdfData.info);
+
+    // If Gemini API is available and document contains text, refine analysis with AI
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!isScanned && apiKey && apiKey !== 'MY_GEMINI_API_KEY' && apiKey.trim() !== '') {
+      try {
+        const ai = new GoogleGenAI({ apiKey });
+        const geminiPrompt = `Tu es un inspecteur pédagogique expert de SVT au collège marocain (1AC, 2AC, 3AC).
+Analyse cet extrait de cours PDF et renvoie UNIQUEMENT un objet JSON valide avec cette structure :
+{
+  "title": "Titre du cours en français (court, fidèle au programme marocain)",
+  "titleAr": "عنوان الدرس بالعربية حسب المقرر المغربي الرسمي",
+  "gradeLevel": "1AC" ou "2AC" ou "3AC",
+  "semester": 1 ou 2,
+  "themeTitle": "Unité / Thème officiel marocain",
+  "themeTitleAr": "عنوان الوحدة الرسمي",
+  "chapterTitle": "Titre du chapitre",
+  "chapterTitleAr": "عنوان الفصل",
+  "summary": "Résumé scientifique en français (2-3 phrases)",
+  "summaryAr": "ملخص علمي باللغة العربية",
+  "objectives": ["Objectif pédagogique 1", "Objectif 2"],
+  "objectivesAr": ["هدف تعلمي 1", "هدف 2"]
+}
+
+Texte extrait du document PDF :
+${rawText.slice(0, 3500)}`;
+
+        const response = await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: geminiPrompt,
+          config: {
+            temperature: 0.2,
+            responseMimeType: 'application/json',
+          }
+        });
+
+        if (response.text) {
+          const parsed = JSON.parse(response.text);
+          if (parsed.title) analysis.title = parsed.title;
+          if (parsed.titleAr) analysis.titleAr = parsed.titleAr;
+          if (['1AC', '2AC', '3AC'].includes(parsed.gradeLevel)) analysis.gradeLevel = parsed.gradeLevel;
+          if (parsed.semester === 1 || parsed.semester === 2) analysis.semester = parsed.semester;
+          if (parsed.themeTitle) analysis.themeTitle = parsed.themeTitle;
+          if (parsed.themeTitleAr) analysis.themeTitleAr = parsed.themeTitleAr;
+          if (parsed.chapterTitle) analysis.chapterTitle = parsed.chapterTitle;
+          if (parsed.chapterTitleAr) analysis.chapterTitleAr = parsed.chapterTitleAr;
+          if (parsed.summary) analysis.summary = parsed.summary;
+          if (parsed.summaryAr) analysis.summaryAr = parsed.summaryAr;
+          if (Array.isArray(parsed.objectives) && parsed.objectives.length > 0) analysis.objectives = parsed.objectives;
+          if (Array.isArray(parsed.objectivesAr) && parsed.objectivesAr.length > 0) analysis.objectivesAr = parsed.objectivesAr;
+        }
+      } catch (geminiErr: any) {
+        console.warn('Gemini extraction refinement fallback:', geminiErr?.message);
+      }
+    }
+
+    return res.json({
+      success: true,
+      hasText: !isScanned,
+      isScanned,
+      pageCount: pdfData.numpages || 1,
+      extracted: analysis,
+      rawSnippet: rawText.slice(0, 400)
+    });
+  } catch (err: any) {
+    console.error('Server error /api/parse-pdf:', err);
+    res.status(500).json({ error: 'Erreur interne lors du traitement du fichier PDF.' });
+  }
+});
+
+function analyzeSvtPdfContent(rawText: string, filename: string, info: any) {
+  const lower = (rawText + ' ' + filename).toLowerCase();
+
+  // Grade level detection for Moroccan Collège
+  let gradeLevel: '1AC' | '2AC' | '3AC' = '3AC';
+  if (lower.includes('1ac') || lower.includes('1 asc') || lower.includes('première année') || lower.includes('السنة الأولى') || lower.includes('milieu naturel') || lower.includes('respiration des êtres vivants') || lower.includes('végétaux chlorophylliens')) {
+    gradeLevel = '1AC';
+  } else if (lower.includes('2ac') || lower.includes('2 asc') || lower.includes('deuxième année') || lower.includes('السنة الثانية') || lower.includes('tectonique') || lower.includes('séisme') || lower.includes('volcan') || lower.includes('dérive des continents') || lower.includes('roches magmatiques')) {
+    gradeLevel = '2AC';
+  } else if (lower.includes('3ac') || lower.includes('3 asc') || lower.includes('troisième année') || lower.includes('السنة الثالثة') || lower.includes('digestion') || lower.includes('nerveux') || lower.includes('immunité') || lower.includes('nutriment') || lower.includes('absorption')) {
+    gradeLevel = '3AC';
+  }
+
+  // Semester detection
+  let semester: 1 | 2 = 1;
+  if (lower.includes('semestre 2') || lower.includes('s2') || lower.includes('الدورة الثانية') || lower.includes('système nerveux') || lower.includes('immunité') || lower.includes('géologie externe') || lower.includes('reproduction chez les animaux')) {
+    semester = 2;
+  }
+
+  // Moroccan official unit titles
+  let themeTitle = gradeLevel === '1AC' ? 'Unité 1 : Les relations entre les êtres vivants et leurs interactions avec les milieux'
+    : gradeLevel === '2AC' ? 'Unité 1 : Les phénomènes géologiques internes'
+    : semester === 2 ? 'Unité 2 : Les fonctions de communication et l\'immunité'
+    : 'Unité 1 : Les fonctions de nutrition et l\'éducation nutritionnelle';
+
+  let themeTitleAr = gradeLevel === '1AC' ? 'الوحدة 1 : العلاقات بين الكائنات الحية وتفاعلها مع أوساط عيشها'
+    : gradeLevel === '2AC' ? 'الوحدة 1 : الظواهر الجيولوجية الباطنية'
+    : semester === 2 ? 'الوحدة 2 : وظائف التواصل والمناعة'
+    : 'الوحدة 1 : وظائف الاقتيات والتربية الغذائية';
+
+  // Title detection
+  let title = '';
+  let titleAr = '';
+
+  // Check PDF metadata Title
+  if (info && info.Title && typeof info.Title === 'string' && info.Title.trim().length > 4 && !info.Title.toLowerCase().includes('untitled')) {
+    title = info.Title.trim();
+  }
+
+  // Scan text for headers
+  if (!title && rawText) {
+    const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 5 && l.length < 80);
+    for (const line of lines) {
+      const match = line.match(/(?:le[çc]on|chapitre|cours|titre|module)\s*[:\-–]\s*(.+)/i);
+      if (match && match[1]) {
+        title = match[1].trim();
+        break;
+      }
+    }
+    if (!title && lines.length > 0) {
+      const candidate = lines.find(l => /^(le|la|les|l'|d'|étude|notion|introduction|structure)\s+/i.test(l) && l.length < 70);
+      if (candidate) title = candidate;
+    }
+  }
+
+  // Clean filename fallback
+  if (!title) {
+    const clean = filename
+      .replace(/\.[^/.]+$/, '')
+      .replace(/[_\-]+/g, ' ')
+      .replace(/\b(cours|svt|college|pro|1ac|2ac|3ac|s1|s2|pdf|doc)\b/gi, '')
+      .trim();
+    if (clean.length > 3) {
+      title = clean.charAt(0).toUpperCase() + clean.slice(1);
+    }
+  }
+
+  // Arabic counterpart mapping for Moroccan SVT curriculum
+  const titleLower = title.toLowerCase();
+  if (titleLower.includes('photosynth')) {
+    titleAr = 'التركيب الضوئي وإنتاج المادة العضوية';
+  } else if (titleLower.includes('digestion')) {
+    titleAr = 'هضم الأغذية والامتصاص المعوي';
+  } else if (titleLower.includes('respiration')) {
+    titleAr = 'التنفس في أوساط عيش مختلفة';
+  } else if (titleLower.includes('nerveux')) {
+    titleAr = 'الجهاز العصبي والتحركية الإرادية واللاإرادية';
+  } else if (titleLower.includes('séisme') || titleLower.includes('seisme')) {
+    titleAr = 'الزلازل وعلاقتها بتكتونية الصفائح';
+  } else if (titleLower.includes('tectonique') || titleLower.includes('dérive')) {
+    titleAr = 'تكتونية الصفائح وزحزحة القارات';
+  } else if (titleLower.includes('milieu')) {
+    titleAr = 'استكشاف وسط طبيعي وملاحظة الخلية';
+  }
+
+  return {
+    title,
+    titleAr,
+    gradeLevel,
+    semester,
+    themeTitle,
+    themeTitleAr,
+    chapterTitle: `Chapitre : ${title || 'Notions Fondamentales'}`,
+    chapterTitleAr: `الفصل : ${titleAr || 'المفاهيم الأساسية'}`,
+    summary: rawText.length > 50
+      ? rawText.slice(0, 260).replace(/\s+/g, ' ') + '...'
+      : 'Document et support de cours conforme aux orientations pédagogiques officielles du collège marocain.',
+    summaryAr: 'درس ووثيقة مطابقة للتوجيهات التربوية الرسمية لوزارة التربية الوطنية المغربية.',
+    objectives: [
+      'Maîtriser les notions scientifiques clés conformément au manuel scolaire marocain.',
+      'Exploiter les données d\'observation et expérimentales présentées dans la leçon.'
+    ],
+    objectivesAr: [
+      'استيعاب المفاهيم العلمية الأساسية وفق المنهاج الدراسي المغربي.',
+      'استثمار معطيات الملاحظة والتجارب العلمية الواردة في الدرس.'
+    ]
+  };
+}
 
 // Dedicated SVT Pedagogical Gemini AI Endpoint
 app.post('/api/gemini', async (req: Request, res: Response) => {

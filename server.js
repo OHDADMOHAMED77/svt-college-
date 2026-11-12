@@ -3,17 +3,179 @@ import express from "express";
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
+import { createRequire } from "module";
 import { GoogleGenAI } from "@google/genai";
+var require2 = createRequire(import.meta.url);
+var pdfParse = require2("pdf-parse");
 dotenv.config();
 var __filename = fileURLToPath(import.meta.url);
 var __dirname = path.dirname(__filename);
 var app = express();
 var PORT = Number(process.env.PORT) || 3e3;
 var HOST = "0.0.0.0";
-app.use(express.json({ limit: "5mb" }));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 app.get("/healthz", (_req, res) => {
   res.status(200).send("OK");
 });
+app.post("/api/parse-pdf", async (req, res) => {
+  try {
+    const { pdfBase64, filename } = req.body;
+    if (!pdfBase64) {
+      return res.status(400).json({ error: "Fichier PDF manquant (base64 requis)." });
+    }
+    const cleanBase64 = String(pdfBase64).replace(/^data:application\/pdf;base64,/, "");
+    const buffer = Buffer.from(cleanBase64, "base64");
+    let pdfData = { text: "", numpages: 1, info: {} };
+    try {
+      pdfData = await pdfParse(buffer);
+    } catch (parseErr) {
+      console.warn("PDF parse warning, processing as scanned document:", parseErr?.message);
+    }
+    const rawText = (pdfData.text || "").trim();
+    const isScanned = rawText.length < 40;
+    const analysis = analyzeSvtPdfContent(rawText, filename || "cours.pdf", pdfData.info);
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!isScanned && apiKey && apiKey !== "MY_GEMINI_API_KEY" && apiKey.trim() !== "") {
+      try {
+        const ai = new GoogleGenAI({ apiKey });
+        const geminiPrompt = `Tu es un inspecteur p\xE9dagogique expert de SVT au coll\xE8ge marocain (1AC, 2AC, 3AC).
+Analyse cet extrait de cours PDF et renvoie UNIQUEMENT un objet JSON valide avec cette structure :
+{
+  "title": "Titre du cours en fran\xE7ais (court, fid\xE8le au programme marocain)",
+  "titleAr": "\u0639\u0646\u0648\u0627\u0646 \u0627\u0644\u062F\u0631\u0633 \u0628\u0627\u0644\u0639\u0631\u0628\u064A\u0629 \u062D\u0633\u0628 \u0627\u0644\u0645\u0642\u0631\u0631 \u0627\u0644\u0645\u063A\u0631\u0628\u064A \u0627\u0644\u0631\u0633\u0645\u064A",
+  "gradeLevel": "1AC" ou "2AC" ou "3AC",
+  "semester": 1 ou 2,
+  "themeTitle": "Unit\xE9 / Th\xE8me officiel marocain",
+  "themeTitleAr": "\u0639\u0646\u0648\u0627\u0646 \u0627\u0644\u0648\u062D\u062F\u0629 \u0627\u0644\u0631\u0633\u0645\u064A",
+  "chapterTitle": "Titre du chapitre",
+  "chapterTitleAr": "\u0639\u0646\u0648\u0627\u0646 \u0627\u0644\u0641\u0635\u0644",
+  "summary": "R\xE9sum\xE9 scientifique en fran\xE7ais (2-3 phrases)",
+  "summaryAr": "\u0645\u0644\u062E\u0635 \u0639\u0644\u0645\u064A \u0628\u0627\u0644\u0644\u063A\u0629 \u0627\u0644\u0639\u0631\u0628\u064A\u0629",
+  "objectives": ["Objectif p\xE9dagogique 1", "Objectif 2"],
+  "objectivesAr": ["\u0647\u062F\u0641 \u062A\u0639\u0644\u0645\u064A 1", "\u0647\u062F\u0641 2"]
+}
+
+Texte extrait du document PDF :
+${rawText.slice(0, 3500)}`;
+        const response = await ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: geminiPrompt,
+          config: {
+            temperature: 0.2,
+            responseMimeType: "application/json"
+          }
+        });
+        if (response.text) {
+          const parsed = JSON.parse(response.text);
+          if (parsed.title) analysis.title = parsed.title;
+          if (parsed.titleAr) analysis.titleAr = parsed.titleAr;
+          if (["1AC", "2AC", "3AC"].includes(parsed.gradeLevel)) analysis.gradeLevel = parsed.gradeLevel;
+          if (parsed.semester === 1 || parsed.semester === 2) analysis.semester = parsed.semester;
+          if (parsed.themeTitle) analysis.themeTitle = parsed.themeTitle;
+          if (parsed.themeTitleAr) analysis.themeTitleAr = parsed.themeTitleAr;
+          if (parsed.chapterTitle) analysis.chapterTitle = parsed.chapterTitle;
+          if (parsed.chapterTitleAr) analysis.chapterTitleAr = parsed.chapterTitleAr;
+          if (parsed.summary) analysis.summary = parsed.summary;
+          if (parsed.summaryAr) analysis.summaryAr = parsed.summaryAr;
+          if (Array.isArray(parsed.objectives) && parsed.objectives.length > 0) analysis.objectives = parsed.objectives;
+          if (Array.isArray(parsed.objectivesAr) && parsed.objectivesAr.length > 0) analysis.objectivesAr = parsed.objectivesAr;
+        }
+      } catch (geminiErr) {
+        console.warn("Gemini extraction refinement fallback:", geminiErr?.message);
+      }
+    }
+    return res.json({
+      success: true,
+      hasText: !isScanned,
+      isScanned,
+      pageCount: pdfData.numpages || 1,
+      extracted: analysis,
+      rawSnippet: rawText.slice(0, 400)
+    });
+  } catch (err) {
+    console.error("Server error /api/parse-pdf:", err);
+    res.status(500).json({ error: "Erreur interne lors du traitement du fichier PDF." });
+  }
+});
+function analyzeSvtPdfContent(rawText, filename, info) {
+  const lower = (rawText + " " + filename).toLowerCase();
+  let gradeLevel = "3AC";
+  if (lower.includes("1ac") || lower.includes("1 asc") || lower.includes("premi\xE8re ann\xE9e") || lower.includes("\u0627\u0644\u0633\u0646\u0629 \u0627\u0644\u0623\u0648\u0644\u0649") || lower.includes("milieu naturel") || lower.includes("respiration des \xEAtres vivants") || lower.includes("v\xE9g\xE9taux chlorophylliens")) {
+    gradeLevel = "1AC";
+  } else if (lower.includes("2ac") || lower.includes("2 asc") || lower.includes("deuxi\xE8me ann\xE9e") || lower.includes("\u0627\u0644\u0633\u0646\u0629 \u0627\u0644\u062B\u0627\u0646\u064A\u0629") || lower.includes("tectonique") || lower.includes("s\xE9isme") || lower.includes("volcan") || lower.includes("d\xE9rive des continents") || lower.includes("roches magmatiques")) {
+    gradeLevel = "2AC";
+  } else if (lower.includes("3ac") || lower.includes("3 asc") || lower.includes("troisi\xE8me ann\xE9e") || lower.includes("\u0627\u0644\u0633\u0646\u0629 \u0627\u0644\u062B\u0627\u0644\u062B\u0629") || lower.includes("digestion") || lower.includes("nerveux") || lower.includes("immunit\xE9") || lower.includes("nutriment") || lower.includes("absorption")) {
+    gradeLevel = "3AC";
+  }
+  let semester = 1;
+  if (lower.includes("semestre 2") || lower.includes("s2") || lower.includes("\u0627\u0644\u062F\u0648\u0631\u0629 \u0627\u0644\u062B\u0627\u0646\u064A\u0629") || lower.includes("syst\xE8me nerveux") || lower.includes("immunit\xE9") || lower.includes("g\xE9ologie externe") || lower.includes("reproduction chez les animaux")) {
+    semester = 2;
+  }
+  let themeTitle = gradeLevel === "1AC" ? "Unit\xE9 1 : Les relations entre les \xEAtres vivants et leurs interactions avec les milieux" : gradeLevel === "2AC" ? "Unit\xE9 1 : Les ph\xE9nom\xE8nes g\xE9ologiques internes" : semester === 2 ? "Unit\xE9 2 : Les fonctions de communication et l'immunit\xE9" : "Unit\xE9 1 : Les fonctions de nutrition et l'\xE9ducation nutritionnelle";
+  let themeTitleAr = gradeLevel === "1AC" ? "\u0627\u0644\u0648\u062D\u062F\u0629 1 : \u0627\u0644\u0639\u0644\u0627\u0642\u0627\u062A \u0628\u064A\u0646 \u0627\u0644\u0643\u0627\u0626\u0646\u0627\u062A \u0627\u0644\u062D\u064A\u0629 \u0648\u062A\u0641\u0627\u0639\u0644\u0647\u0627 \u0645\u0639 \u0623\u0648\u0633\u0627\u0637 \u0639\u064A\u0634\u0647\u0627" : gradeLevel === "2AC" ? "\u0627\u0644\u0648\u062D\u062F\u0629 1 : \u0627\u0644\u0638\u0648\u0627\u0647\u0631 \u0627\u0644\u062C\u064A\u0648\u0644\u0648\u062C\u064A\u0629 \u0627\u0644\u0628\u0627\u0637\u0646\u064A\u0629" : semester === 2 ? "\u0627\u0644\u0648\u062D\u062F\u0629 2 : \u0648\u0638\u0627\u0626\u0641 \u0627\u0644\u062A\u0648\u0627\u0635\u0644 \u0648\u0627\u0644\u0645\u0646\u0627\u0639\u0629" : "\u0627\u0644\u0648\u062D\u062F\u0629 1 : \u0648\u0638\u0627\u0626\u0641 \u0627\u0644\u0627\u0642\u062A\u064A\u0627\u062A \u0648\u0627\u0644\u062A\u0631\u0628\u064A\u0629 \u0627\u0644\u063A\u0630\u0627\u0626\u064A\u0629";
+  let title = "";
+  let titleAr = "";
+  if (info && info.Title && typeof info.Title === "string" && info.Title.trim().length > 4 && !info.Title.toLowerCase().includes("untitled")) {
+    title = info.Title.trim();
+  }
+  if (!title && rawText) {
+    const lines = rawText.split("\n").map((l) => l.trim()).filter((l) => l.length > 5 && l.length < 80);
+    for (const line of lines) {
+      const match = line.match(/(?:le[çc]on|chapitre|cours|titre|module)\s*[:\-–]\s*(.+)/i);
+      if (match && match[1]) {
+        title = match[1].trim();
+        break;
+      }
+    }
+    if (!title && lines.length > 0) {
+      const candidate = lines.find((l) => /^(le|la|les|l'|d'|étude|notion|introduction|structure)\s+/i.test(l) && l.length < 70);
+      if (candidate) title = candidate;
+    }
+  }
+  if (!title) {
+    const clean = filename.replace(/\.[^/.]+$/, "").replace(/[_\-]+/g, " ").replace(/\b(cours|svt|college|pro|1ac|2ac|3ac|s1|s2|pdf|doc)\b/gi, "").trim();
+    if (clean.length > 3) {
+      title = clean.charAt(0).toUpperCase() + clean.slice(1);
+    }
+  }
+  const titleLower = title.toLowerCase();
+  if (titleLower.includes("photosynth")) {
+    titleAr = "\u0627\u0644\u062A\u0631\u0643\u064A\u0628 \u0627\u0644\u0636\u0648\u0626\u064A \u0648\u0625\u0646\u062A\u0627\u062C \u0627\u0644\u0645\u0627\u062F\u0629 \u0627\u0644\u0639\u0636\u0648\u064A\u0629";
+  } else if (titleLower.includes("digestion")) {
+    titleAr = "\u0647\u0636\u0645 \u0627\u0644\u0623\u063A\u0630\u064A\u0629 \u0648\u0627\u0644\u0627\u0645\u062A\u0635\u0627\u0635 \u0627\u0644\u0645\u0639\u0648\u064A";
+  } else if (titleLower.includes("respiration")) {
+    titleAr = "\u0627\u0644\u062A\u0646\u0641\u0633 \u0641\u064A \u0623\u0648\u0633\u0627\u0637 \u0639\u064A\u0634 \u0645\u062E\u062A\u0644\u0641\u0629";
+  } else if (titleLower.includes("nerveux")) {
+    titleAr = "\u0627\u0644\u062C\u0647\u0627\u0632 \u0627\u0644\u0639\u0635\u0628\u064A \u0648\u0627\u0644\u062A\u062D\u0631\u0643\u064A\u0629 \u0627\u0644\u0625\u0631\u0627\u062F\u064A\u0629 \u0648\u0627\u0644\u0644\u0627\u0625\u0631\u0627\u062F\u064A\u0629";
+  } else if (titleLower.includes("s\xE9isme") || titleLower.includes("seisme")) {
+    titleAr = "\u0627\u0644\u0632\u0644\u0627\u0632\u0644 \u0648\u0639\u0644\u0627\u0642\u062A\u0647\u0627 \u0628\u062A\u0643\u062A\u0648\u0646\u064A\u0629 \u0627\u0644\u0635\u0641\u0627\u0626\u062D";
+  } else if (titleLower.includes("tectonique") || titleLower.includes("d\xE9rive")) {
+    titleAr = "\u062A\u0643\u062A\u0648\u0646\u064A\u0629 \u0627\u0644\u0635\u0641\u0627\u0626\u062D \u0648\u0632\u062D\u0632\u062D\u0629 \u0627\u0644\u0642\u0627\u0631\u0627\u062A";
+  } else if (titleLower.includes("milieu")) {
+    titleAr = "\u0627\u0633\u062A\u0643\u0634\u0627\u0641 \u0648\u0633\u0637 \u0637\u0628\u064A\u0639\u064A \u0648\u0645\u0644\u0627\u062D\u0638\u0629 \u0627\u0644\u062E\u0644\u064A\u0629";
+  }
+  return {
+    title,
+    titleAr,
+    gradeLevel,
+    semester,
+    themeTitle,
+    themeTitleAr,
+    chapterTitle: `Chapitre : ${title || "Notions Fondamentales"}`,
+    chapterTitleAr: `\u0627\u0644\u0641\u0635\u0644 : ${titleAr || "\u0627\u0644\u0645\u0641\u0627\u0647\u064A\u0645 \u0627\u0644\u0623\u0633\u0627\u0633\u064A\u0629"}`,
+    summary: rawText.length > 50 ? rawText.slice(0, 260).replace(/\s+/g, " ") + "..." : "Document et support de cours conforme aux orientations p\xE9dagogiques officielles du coll\xE8ge marocain.",
+    summaryAr: "\u062F\u0631\u0633 \u0648\u0648\u062B\u064A\u0642\u0629 \u0645\u0637\u0627\u0628\u0642\u0629 \u0644\u0644\u062A\u0648\u062C\u064A\u0647\u0627\u062A \u0627\u0644\u062A\u0631\u0628\u0648\u064A\u0629 \u0627\u0644\u0631\u0633\u0645\u064A\u0629 \u0644\u0648\u0632\u0627\u0631\u0629 \u0627\u0644\u062A\u0631\u0628\u064A\u0629 \u0627\u0644\u0648\u0637\u0646\u064A\u0629 \u0627\u0644\u0645\u063A\u0631\u0628\u064A\u0629.",
+    objectives: [
+      "Ma\xEEtriser les notions scientifiques cl\xE9s conform\xE9ment au manuel scolaire marocain.",
+      "Exploiter les donn\xE9es d'observation et exp\xE9rimentales pr\xE9sent\xE9es dans la le\xE7on."
+    ],
+    objectivesAr: [
+      "\u0627\u0633\u062A\u064A\u0639\u0627\u0628 \u0627\u0644\u0645\u0641\u0627\u0647\u064A\u0645 \u0627\u0644\u0639\u0644\u0645\u064A\u0629 \u0627\u0644\u0623\u0633\u0627\u0633\u064A\u0629 \u0648\u0641\u0642 \u0627\u0644\u0645\u0646\u0647\u0627\u062C \u0627\u0644\u062F\u0631\u0627\u0633\u064A \u0627\u0644\u0645\u063A\u0631\u0628\u064A.",
+      "\u0627\u0633\u062A\u062B\u0645\u0627\u0631 \u0645\u0639\u0637\u064A\u0627\u062A \u0627\u0644\u0645\u0644\u0627\u062D\u0638\u0629 \u0648\u0627\u0644\u062A\u062C\u0627\u0631\u0628 \u0627\u0644\u0639\u0644\u0645\u064A\u0629 \u0627\u0644\u0648\u0627\u0631\u062F\u0629 \u0641\u064A \u0627\u0644\u062F\u0631\u0633."
+    ]
+  };
+}
 app.post("/api/gemini", async (req, res) => {
   try {
     const { prompt, gradeLevel, language, mode } = req.body;
