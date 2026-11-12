@@ -14,8 +14,18 @@ import { MOROCCAN_SVT_LESSONS } from './data/moroccanSvtCurriculum';
 import { Lesson, GradeLevel, UserRole, UserProfile } from './types/svt';
 import { calculateLevelFromXP, checkNewUnlockedBadges } from './utils/svtLogic';
 import { auth, onAuthStateChanged, db, handleFirestoreError, OperationType } from './firebase/config';
-import { doc, setDoc, getDocs, collection } from 'firebase/firestore';
+import { doc, setDoc, deleteDoc, getDocs, collection } from 'firebase/firestore';
 import { ShieldAlert } from 'lucide-react';
+
+/** Reads a JSON value from localStorage, falling back when it is missing or corrupted. */
+function readStored<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
 
 export default function App() {
   const [language, setLanguage] = useState<'fr' | 'ar'>('fr');
@@ -148,7 +158,7 @@ export default function App() {
     }
   };
 
-  const deleteLesson = (lessonId: string) => {
+  const deleteLesson = async (lessonId: string) => {
     setLessons(prev => {
       const next = prev.filter(l => l.id !== lessonId);
       try {
@@ -158,6 +168,13 @@ export default function App() {
       }
       return next;
     });
+
+    // Also delete it in Firestore, otherwise it is merged back on the next page load
+    try {
+      await deleteDoc(doc(db, 'lessons', lessonId));
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, `lessons/${lessonId}`);
+    }
   };
 
   const duplicateLesson = (lessonToDuplicate: Lesson) => {
@@ -194,6 +211,17 @@ export default function App() {
     }
   });
 
+  // Best score per quiz (quizId -> score /20), distinct experiments done, and free codes already used
+  const [quizBestScores, setQuizBestScores] = useState<Record<string, number>>(() =>
+    readStored<Record<string, number>>('svt_quiz_best_scores', {})
+  );
+  const [completedExperiments, setCompletedExperiments] = useState<string[]>(() =>
+    readStored<string[]>('svt_completed_experiments', [])
+  );
+  const [activatedCodes, setActivatedCodes] = useState<string[]>(() =>
+    readStored<string[]>('svt_activated_codes', [])
+  );
+
   const levelInfo = calculateLevelFromXP(points);
 
   // Lesson Modal Reader State
@@ -202,53 +230,83 @@ export default function App() {
   const [initialQuizId, setInitialQuizId] = useState<string | undefined>();
   const [isFreeModalOpen, setIsFreeModalOpen] = useState(false);
 
-  const handleCompleteLesson = (lessonId: string) => {
-    if (!completedLessonIds.includes(lessonId)) {
-      const updated = [...completedLessonIds, lessonId];
-      setCompletedLessonIds(updated);
-      localStorage.setItem('svt_completed_lessons', JSON.stringify(updated));
+  const addXP = (amount: number) => {
+    const newXP = points + amount;
+    setPoints(newXP);
+    localStorage.setItem('svt_points', String(newXP));
+  };
 
-      const newXP = points + 50;
-      setPoints(newXP);
-      localStorage.setItem('svt_points', String(newXP));
+  // Badge statistics computed from real progress (previously hard-coded to 1)
+  const buildBadgeStats = (
+    lessonCount: number,
+    quizScores: Record<string, number>,
+    experiments: string[]
+  ) => ({
+    totalCompletedLessons: lessonCount,
+    perfectScoresCount: Object.values(quizScores).filter(score => score >= 20).length,
+    totalQuizzesTaken: Object.keys(quizScores).length,
+    experimentsConducted: experiments.length,
+    gradeLevel: selectedGrade
+  });
 
-      // Check badges
-      const newBadges = checkNewUnlockedBadges(unlockedBadges, {
-        totalCompletedLessons: updated.length,
-        perfectScoresCount: 1,
-        totalQuizzesTaken: 1,
-        experimentsConducted: 1,
-        gradeLevel: selectedGrade
-      });
-
-      if (newBadges.length > 0) {
-        const merged = [...unlockedBadges, ...newBadges];
-        setUnlockedBadges(merged);
-        localStorage.setItem('svt_badges', JSON.stringify(merged));
-      }
+  const unlockNewBadges = (stats: ReturnType<typeof buildBadgeStats>) => {
+    const newBadges = checkNewUnlockedBadges(unlockedBadges, stats);
+    if (newBadges.length > 0) {
+      const merged = [...unlockedBadges, ...newBadges];
+      setUnlockedBadges(merged);
+      localStorage.setItem('svt_badges', JSON.stringify(merged));
     }
+  };
+
+  const handleCompleteLesson = (lessonId: string) => {
+    if (completedLessonIds.includes(lessonId)) return;
+
+    const updated = [...completedLessonIds, lessonId];
+    setCompletedLessonIds(updated);
+    localStorage.setItem('svt_completed_lessons', JSON.stringify(updated));
+    addXP(50);
+    unlockNewBadges(buildBadgeStats(updated.length, quizBestScores, completedExperiments));
   };
 
   const handleQuizCompleted = (quizId: string, scoreOver20: number, xpEarned: number) => {
-    const newXP = points + xpEarned;
-    setPoints(newXP);
-    localStorage.setItem('svt_points', String(newXP));
+    const isFirstCompletion = !(quizId in quizBestScores);
+    const nextScores = {
+      ...quizBestScores,
+      [quizId]: Math.max(scoreOver20, quizBestScores[quizId] || 0)
+    };
+    setQuizBestScores(nextScores);
+    localStorage.setItem('svt_quiz_best_scores', JSON.stringify(nextScores));
+
+    // XP is granted only the first time a quiz is completed, so retrying cannot farm points
+    if (isFirstCompletion) {
+      addXP(xpEarned);
+    }
+    unlockNewBadges(buildBadgeStats(completedLessonIds.length, nextScores, completedExperiments));
   };
 
   const handleExperimentCompleted = (expId: string) => {
-    const newXP = points + 40;
-    setPoints(newXP);
-    localStorage.setItem('svt_points', String(newXP));
+    // The lab fires this event every time the last step is ticked again: reward each experiment once
+    if (completedExperiments.includes(expId)) return;
+
+    const nextExperiments = [...completedExperiments, expId];
+    setCompletedExperiments(nextExperiments);
+    localStorage.setItem('svt_completed_experiments', JSON.stringify(nextExperiments));
+    addXP(40);
+    unlockNewBadges(buildBadgeStats(completedLessonIds.length, quizBestScores, nextExperiments));
   };
 
   const handleActivateFreeCode = (code: string) => {
-    if (code === 'MAROC-SVT-2025' || code.startsWith('SVT-')) {
-      const bonusXP = points + 200;
-      setPoints(bonusXP);
-      localStorage.setItem('svt_points', String(bonusXP));
-      return true;
-    }
-    return false;
+    const isKnownCode = code === 'MAROC-SVT-2025' || code.startsWith('SVT-');
+    if (!isKnownCode) return false;
+
+    // A code grants its bonus only once on this device
+    if (activatedCodes.includes(code)) return true;
+
+    const nextCodes = [...activatedCodes, code];
+    setActivatedCodes(nextCodes);
+    localStorage.setItem('svt_activated_codes', JSON.stringify(nextCodes));
+    addXP(200);
+    return true;
   };
 
   return (

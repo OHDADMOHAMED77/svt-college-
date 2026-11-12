@@ -18,9 +18,40 @@ const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = '0.0.0.0';
 
-// Allow up to 50MB for rich PDF uploads
-app.use(express.json({ limit: '50mb' }));
+// Cloud Run sits behind one proxy: trust it so req.ip is the real client address
+app.set('trust proxy', 1);
+// Large JSON bodies are only needed for the PDF import endpoint
+app.use('/api/parse-pdf', express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '20kb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+const MAX_PROMPT_LENGTH = 1000;
+const ALLOWED_GRADES = ['1AC', '2AC', '3AC'];
+const ALLOWED_MODES = ['explain', 'quiz', 'fiche', 'general'];
+
+// Simple in-memory rate limit per client IP, to protect the Gemini API key from abuse
+const RATE_WINDOW_MS = 60_000;
+const RATE_MAX_REQUESTS = 20;
+const requestCounts = new Map<string, { count: number; resetAt: number }>();
+
+function isRateLimited(ip: string): boolean {
+  const now = Date.now();
+
+  if (requestCounts.size > 5000) {
+    for (const [key, entry] of requestCounts) {
+      if (entry.resetAt <= now) requestCounts.delete(key);
+    }
+  }
+
+  const entry = requestCounts.get(ip);
+  if (!entry || entry.resetAt <= now) {
+    requestCounts.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS });
+    return false;
+  }
+
+  entry.count += 1;
+  return entry.count > RATE_MAX_REQUESTS;
+}
 
 // Cloud Healthcheck endpoint for Cloud Run and load balancers
 app.get('/healthz', (_req, res) => {
@@ -232,11 +263,24 @@ function analyzeSvtPdfContent(rawText: string, filename: string, info: any) {
 // Dedicated SVT Pedagogical Gemini AI Endpoint
 app.post('/api/gemini', async (req: Request, res: Response) => {
   try {
-    const { prompt, gradeLevel, language, mode } = req.body;
+    if (isRateLimited(req.ip || 'unknown')) {
+      return res.status(429).json({ error: 'Trop de requêtes. Réessayez dans une minute.' });
+    }
 
-    if (!prompt) {
+    const body = req.body ?? {};
+
+    if (typeof body.prompt !== 'string' || body.prompt.trim() === '') {
       return res.status(400).json({ error: 'Le prompt est requis.' });
     }
+    if (body.prompt.length > MAX_PROMPT_LENGTH) {
+      return res.status(400).json({ error: `La question ne doit pas dépasser ${MAX_PROMPT_LENGTH} caractères.` });
+    }
+
+    // Validate client-provided options before they reach the system prompt
+    const prompt: string = body.prompt.trim();
+    const gradeLevel: string = ALLOWED_GRADES.includes(body.gradeLevel) ? body.gradeLevel : 'Collège Marocain';
+    const language: 'fr' | 'ar' = body.language === 'ar' ? 'ar' : 'fr';
+    const mode: string = ALLOWED_MODES.includes(body.mode) ? body.mode : 'explain';
 
     const apiKey = process.env.GEMINI_API_KEY;
 
@@ -248,8 +292,8 @@ Règles :
 1. Explique les concepts scientifiques avec pédagogie, clarté et précision conformément aux manuels marocains officiels (Al Massar, Al Moufid, etc.).
 2. N'invente jamais de faits scientifiques.
 3. Si le mode est 'explain', donne une explication structurée avec analogies du quotidien.
-4. Si le mode is 'quiz', génère 3 questions d'entraînement avec barème et correction détaillée.
-5. Si le mode is 'fiche', génère une fiche de révision synthétique avec définitions clés et schéma à retenir.
+4. Si le mode est 'quiz', génère 3 questions d'entraînement avec barème et correction détaillée.
+5. Si le mode est 'fiche', génère une fiche de révision synthétique avec définitions clés et schéma à retenir.
 6. Sois bienveillant, encourageant et motivant.`;
 
     if (apiKey && apiKey !== 'MY_GEMINI_API_KEY' && apiKey.trim() !== '') {

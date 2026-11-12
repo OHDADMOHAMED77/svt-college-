@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Bot, Send, Sparkles, BookOpen, Lightbulb, HelpCircle,
   FileText, CheckCircle, RefreshCw, AlertCircle
 } from 'lucide-react';
 import { askSvtAssistant } from '../services/geminiService';
 import { GradeLevel } from '../types/svt';
+import { SimpleMarkdown } from './SimpleMarkdown';
 
 interface AiTutorProps {
   gradeLevel: GradeLevel;
@@ -24,6 +25,12 @@ export const AiTutor: React.FC<AiTutorProps> = ({ gradeLevel, language }) => {
     }
   ]);
   const [isLoading, setIsLoading] = useState(false);
+  const chatRef = useRef<HTMLDivElement>(null);
+
+  // Keep the latest message visible
+  useEffect(() => {
+    chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
+  }, [messages, isLoading]);
 
   const quickPrompts = [
     { labelFr: '🌿 La photosynthèse', labelAr: '🌿 التركيب الضوئي', query: 'Explique-moi la photosynthèse et le test à l\'eau iodée simplement' },
@@ -132,7 +139,7 @@ export const AiTutor: React.FC<AiTutorProps> = ({ gradeLevel, language }) => {
       </div>
 
       {/* Chat Messages Stream */}
-      <div className="bg-slate-800/80 border border-slate-700 rounded-3xl p-5 space-y-4 shadow-2xl min-h-[400px] max-h-[550px] overflow-y-auto flex flex-col">
+      <div ref={chatRef} className="bg-slate-800/80 border border-slate-700 rounded-3xl p-5 space-y-4 shadow-2xl min-h-[400px] max-h-[550px] overflow-y-auto flex flex-col">
         {messages.map((msg, idx) => (
           <div
             key={idx}
@@ -154,7 +161,9 @@ export const AiTutor: React.FC<AiTutorProps> = ({ gradeLevel, language }) => {
               }`}
               dir={isAr ? 'rtl' : 'ltr'}
             >
-              {msg.content}
+              {msg.role === 'assistant'
+                ? <SimpleMarkdown text={msg.content} />
+                : msg.content}
             </div>
           </div>
         ))}
@@ -180,7 +189,7 @@ export const AiTutor: React.FC<AiTutorProps> = ({ gradeLevel, language }) => {
           onKeyDown={(e) => e.key === 'Enter' && handleSend()}
           placeholder={
             isAr
-              ? 'اطرح سؤالك في علوم الحياة والأرد (مثال: ما هو دور أنزيم النشاوز اللعابي؟)...'
+              ? 'اطرح سؤالك في علوم الحياة والأرض (مثال: ما هو دور أنزيم النشاوز اللعابي؟)...'
               : 'Posez votre question (ex : Pourquoi les stomates se ferment-ils pendant la nuit ?)...'
           }
           className="flex-1 bg-transparent px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none"

@@ -26,8 +26,14 @@ export const QuizCenter: React.FC<QuizCenterProps> = ({
   const allAvailableQuizzes = [...MOROCCAN_SVT_QUIZZES, ...MOROCCAN_EXAMENS_BLANCS];
   const matchingQuizzes = allAvailableQuizzes.filter(q => q.gradeLevel === gradeLevel);
 
+  // Ignore unknown quiz ids (e.g. a lesson linking to a quiz that does not exist)
+  // and fall back to the first quiz of the current grade instead of a random one.
+  const validInitialQuizId = initialQuizId && allAvailableQuizzes.some(q => q.id === initialQuizId)
+    ? initialQuizId
+    : undefined;
+
   const [activeQuizId, setActiveQuizId] = useState<string>(
-    initialQuizId || (matchingQuizzes[0]?.id || allAvailableQuizzes[0].id)
+    validInitialQuizId || matchingQuizzes[0]?.id || allAvailableQuizzes[0].id
   );
 
   const currentQuiz: Quiz = allAvailableQuizzes.find(q => q.id === activeQuizId) || allAvailableQuizzes[0];
@@ -46,20 +52,14 @@ export const QuizCenter: React.FC<QuizCenterProps> = ({
     setTimeLeftSeconds(quiz.durationMinutes * 60);
   };
 
-  // Timer countdown
+  // Timer countdown (a single interval per attempt, no side effects inside the state updater)
   useEffect(() => {
-    if (isSubmitted || timeLeftSeconds <= 0) return;
+    if (isSubmitted) return;
     const interval = setInterval(() => {
-      setTimeLeftSeconds(prev => {
-        if (prev <= 1) {
-          setIsSubmitted(true);
-          return 0;
-        }
-        return prev - 1;
-      });
+      setTimeLeftSeconds(prev => (prev > 0 ? prev - 1 : 0));
     }, 1000);
     return () => clearInterval(interval);
-  }, [isSubmitted, timeLeftSeconds]);
+  }, [isSubmitted]);
 
   const currentQuestion: QuizQuestion = currentQuiz.questions[currentQuestionIdx];
 
@@ -87,6 +87,14 @@ export const QuizCenter: React.FC<QuizCenterProps> = ({
 
     onQuizCompleted(currentQuiz.id, scoreData.scoreOver20, earnedXP);
   };
+
+  // When the timer runs out, submit the attempt exactly like a manual submission
+  // so that the score and XP are recorded.
+  useEffect(() => {
+    if (timeLeftSeconds === 0 && !isSubmitted) {
+      handleFinish();
+    }
+  }, [timeLeftSeconds, isSubmitted]);
 
   const scoreResult = isSubmitted ? calculateQuizScore(currentQuiz.questions, userAnswers) : null;
 
@@ -286,7 +294,9 @@ export const QuizCenter: React.FC<QuizCenterProps> = ({
                     <div className="flex items-start justify-between gap-2">
                       <span className="text-xs font-bold text-slate-400">Question {idx + 1}</span>
                       <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${isCorrect ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
-                        {isCorrect ? (isAr ? '✓ صحيح (+5 ن)' : '✓ Correct (+5 pts)') : (isAr ? '✗ خطأ (0 ن)' : '✗ Incorrect (0 pt)')}
+                        {isCorrect
+                          ? (isAr ? `✓ صحيح (+${q.points} ن)` : `✓ Correct (+${q.points} pts)`)
+                          : (isAr ? '✗ خطأ (0 ن)' : '✗ Incorrect (0 pt)')}
                       </span>
                     </div>
 

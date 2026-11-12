@@ -5,6 +5,7 @@ import {
   HelpCircle, Eye, ArrowLeft
 } from 'lucide-react';
 import { Lesson, QuizQuestion } from '../types/svt';
+import { SimpleMarkdown } from './SimpleMarkdown';
 
 interface LessonModalProps {
   lesson: Lesson | null;
@@ -25,8 +26,6 @@ export const LessonModal: React.FC<LessonModalProps> = ({
   onOpenQuiz,
   language
 }) => {
-  if (!lesson) return null;
-
   const [lessonLang, setLessonLang] = useState<'fr' | 'ar'>(language);
   const isAr = lessonLang === 'ar';
   const [selectedDiagramLabel, setSelectedDiagramLabel] = useState<string | null>(null);
@@ -35,6 +34,9 @@ export const LessonModal: React.FC<LessonModalProps> = ({
   // Self-evaluation exercises answers state
   const [exerciseAnswers, setExerciseAnswers] = useState<Record<string, number>>({});
   const [showCorrections, setShowCorrections] = useState<Record<string, boolean>>({});
+
+  // Hooks must all run before this early return (Rules of Hooks)
+  if (!lesson) return null;
 
   const handlePrintPdf = () => {
     window.print();
@@ -137,9 +139,10 @@ export const LessonModal: React.FC<LessonModalProps> = ({
                   {isAr ? sec.headingAr : sec.heading}
                 </h3>
 
-                <div className="text-sm text-slate-300 leading-relaxed whitespace-pre-line">
-                  {isAr ? sec.bodyMarkdownAr : sec.bodyMarkdown}
-                </div>
+                <SimpleMarkdown
+                  text={(isAr ? sec.bodyMarkdownAr : sec.bodyMarkdown) || ''}
+                  className="text-sm text-slate-300 leading-relaxed"
+                />
 
                 {(sec.keyTakeaway || sec.keyTakeawayAr) && (
                   <div className="bg-emerald-500/10 border-l-4 rtl:border-l-0 rtl:border-r-4 border-emerald-500 p-3 rounded-r-xl rtl:rounded-r-none rtl:rounded-l-xl text-xs text-emerald-300 font-medium">
