@@ -21,10 +21,19 @@ export interface FirestoreErrorInfo {
     email?: string | null;
     emailVerified?: boolean | null;
     isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
   };
 }
 
-export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+export function handleFirestoreError(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null
+): never {
   const currentUser = auth?.currentUser;
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
@@ -35,26 +44,33 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
       email: currentUser?.email,
       emailVerified: currentUser?.emailVerified,
       isAnonymous: currentUser?.isAnonymous,
-    }
+      tenantId: currentUser?.tenantId,
+      providerInfo:
+        currentUser?.providerData?.map(provider => ({
+          providerId: provider.providerId,
+          email: provider.email,
+        })) || [],
+    },
   };
-  console.warn('Firestore Operation Notification:', JSON.stringify(errInfo));
-  return errInfo;
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
 }
 
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 export const auth = getAuth(app);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const googleProvider = new GoogleAuthProvider();
+googleProvider.setCustomParameters({ prompt: 'select_account' });
 
 export { signInWithPopup, signOut, onAuthStateChanged };
 
-// Connection test as mandated by skill
+// Connection test on boot as required
 export async function testConnection() {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.warn("Notice: Client is currently using local cache mode.");
+      console.error('Please check your Firebase configuration.');
     }
   }
 }

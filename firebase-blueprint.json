@@ -2,18 +2,21 @@
   "entities": {
     "UserProfile": {
       "title": "UserProfile",
-      "description": "User profile with role and educational level in the Moroccan SVT curriculum",
+      "description": "User profile with role, educational level, and learning progress in the Moroccan SVT curriculum",
       "type": "object",
       "properties": {
         "uid": { "type": "string", "maxLength": 128 },
         "email": { "type": "string", "maxLength": 128 },
         "displayName": { "type": "string", "maxLength": 100 },
         "role": { "type": "string", "enum": ["admin", "teacher", "student"] },
-        "gradeLevel": { "type": "string", "enum": ["1AC", "2AC", "3AC", "all"] },
+        "gradeLevel": { "type": "string", "enum": ["1AC", "2AC", "3AC"] },
         "preferredLanguage": { "type": "string", "enum": ["fr", "ar"] },
         "points": { "type": "number" },
+        "level": { "type": "number" },
         "streakDays": { "type": "number" },
         "badges": { "type": "array" },
+        "completedLessonIds": { "type": "array" },
+        "quizScores": { "type": "object" },
         "subscriptionPlan": { "type": "string", "enum": ["free", "student_premium", "teacher_premium"] },
         "subscriptionStatus": { "type": "string", "enum": ["active", "expired", "pending"] },
         "createdAt": { "type": "string" },
@@ -26,36 +29,46 @@
       "description": "Educational SVT lesson aligned with the Moroccan middle school curriculum",
       "type": "object",
       "properties": {
-        "id": { "type": "string", "maxLength": 64 },
+        "id": { "type": "string", "maxLength": 128 },
         "gradeLevel": { "type": "string", "enum": ["1AC", "2AC", "3AC"] },
+        "semester": { "type": "number" },
         "themeId": { "type": "string", "maxLength": 64 },
-        "themeTitle": { "type": "string", "maxLength": 150 },
-        "chapterTitle": { "type": "string", "maxLength": 150 },
-        "title": { "type": "string", "maxLength": 150 },
-        "titleAr": { "type": "string", "maxLength": 150 },
-        "description": { "type": "string", "maxLength": 500 },
+        "themeTitle": { "type": "string", "maxLength": 200 },
+        "themeTitleAr": { "type": "string", "maxLength": 200 },
+        "chapterTitle": { "type": "string", "maxLength": 200 },
+        "chapterTitleAr": { "type": "string", "maxLength": 200 },
+        "title": { "type": "string", "maxLength": 200 },
+        "titleAr": { "type": "string", "maxLength": 200 },
+        "summary": { "type": "string", "maxLength": 2000 },
+        "summaryAr": { "type": "string", "maxLength": 2000 },
         "objectives": { "type": "array" },
-        "contentMarkdown": { "type": "string", "maxLength": 20000 },
+        "objectivesAr": { "type": "array" },
+        "contentSections": { "type": "array" },
         "definitions": { "type": "array" },
         "diagrams": { "type": "array" },
+        "mediaAttachments": { "type": "array" },
+        "embeddedExercises": { "type": "array" },
         "status": { "type": "string", "enum": ["draft", "published", "archived"] },
         "isPremium": { "type": "boolean" },
+        "estimatedMinutes": { "type": "number" },
+        "linkedQuizId": { "type": "string", "maxLength": 128 },
+        "linkedExperimentId": { "type": "string", "maxLength": 128 },
         "createdBy": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" }
       },
-      "required": ["id", "gradeLevel", "title", "contentMarkdown", "status"]
+      "required": ["id", "gradeLevel", "title", "status", "isPremium"]
     },
     "Quiz": {
       "title": "Quiz",
       "description": "SVT quiz and assessment with diverse question formats",
       "type": "object",
       "properties": {
-        "id": { "type": "string", "maxLength": 64 },
-        "lessonId": { "type": "string", "maxLength": 64 },
+        "id": { "type": "string", "maxLength": 128 },
+        "lessonId": { "type": "string", "maxLength": 128 },
         "gradeLevel": { "type": "string", "enum": ["1AC", "2AC", "3AC"] },
-        "title": { "type": "string", "maxLength": 150 },
-        "titleAr": { "type": "string", "maxLength": 150 },
+        "title": { "type": "string", "maxLength": 200 },
+        "titleAr": { "type": "string", "maxLength": 200 },
         "durationMinutes": { "type": "number" },
         "questions": { "type": "array" },
         "isExam": { "type": "boolean" },
@@ -70,32 +83,36 @@
       "description": "Student quiz or exam submission result",
       "type": "object",
       "properties": {
-        "id": { "type": "string", "maxLength": 64 },
-        "quizId": { "type": "string", "maxLength": 64 },
+        "id": { "type": "string", "maxLength": 128 },
+        "quizId": { "type": "string", "maxLength": 128 },
+        "quizTitle": { "type": "string", "maxLength": 200 },
         "studentId": { "type": "string", "maxLength": 128 },
         "studentName": { "type": "string", "maxLength": 100 },
         "gradeLevel": { "type": "string", "enum": ["1AC", "2AC", "3AC"] },
         "score": { "type": "number" },
-        "total": { "type": "number" },
         "percentage": { "type": "number" },
+        "passed": { "type": "boolean" },
         "timeSpentSeconds": { "type": "number" },
-        "answers": { "type": "array" },
+        "answers": { "type": "object" },
         "completedAt": { "type": "string" }
       },
-      "required": ["id", "quizId", "studentId", "score", "total"]
+      "required": ["id", "quizId", "studentId", "score", "gradeLevel"]
     },
     "ClassRoom": {
       "title": "ClassRoom",
       "description": "Teacher-managed school class with enrollment code",
       "type": "object",
       "properties": {
-        "id": { "type": "string", "maxLength": 64 },
-        "name": { "type": "string", "maxLength": 100 },
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 120 },
         "gradeLevel": { "type": "string", "enum": ["1AC", "2AC", "3AC"] },
-        "accessCode": { "type": "string", "maxLength": 12 },
+        "academicYear": { "type": "string", "maxLength": 20 },
+        "accessCode": { "type": "string", "maxLength": 20 },
         "teacherId": { "type": "string", "maxLength": 128 },
         "teacherName": { "type": "string", "maxLength": 100 },
-        "studentIds": { "type": "array" },
+        "studentsCount": { "type": "number" },
+        "activeQuizzesCount": { "type": "number" },
+        "averageScore": { "type": "number" },
         "createdAt": { "type": "string" }
       },
       "required": ["id", "name", "gradeLevel", "accessCode", "teacherId"]
@@ -105,13 +122,13 @@
       "description": "Moroccan subscription payment transaction or bank transfer voucher",
       "type": "object",
       "properties": {
-        "id": { "type": "string", "maxLength": 64 },
+        "id": { "type": "string", "maxLength": 128 },
         "userId": { "type": "string", "maxLength": 128 },
         "userName": { "type": "string", "maxLength": 100 },
         "userEmail": { "type": "string", "maxLength": 128 },
         "plan": { "type": "string", "enum": ["student_premium", "teacher_premium"] },
         "amountMAD": { "type": "number" },
-        "method": { "type": "string", "enum": ["cmi_card", "w精确_cash", "bank_transfer"] },
+        "method": { "type": "string", "enum": ["cmi_card", "wafacash", "bank_transfer"] },
         "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
         "reference": { "type": "string", "maxLength": 64 },
         "createdAt": { "type": "string" },
@@ -123,11 +140,11 @@
   "firestore": {
     "/users/{userId}": {
       "schema": { "$ref": "UserProfile" },
-      "description": "User profile records containing credentials, role, points, and subscription state"
+      "description": "User profile records containing role, grade, XP points, completed lessons, badges, and quiz scores"
     },
     "/lessons/{lessonId}": {
       "schema": { "$ref": "Lesson" },
-      "description": "Moroccan SVT lessons organized by grade, theme, and chapter"
+      "description": "Moroccan SVT lessons organized by grade, semester, theme, and chapter"
     },
     "/quizzes/{quizId}": {
       "schema": { "$ref": "Quiz" },

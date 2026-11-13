@@ -14,7 +14,16 @@ import { MOROCCAN_SVT_LESSONS } from './data/moroccanSvtCurriculum';
 import { Lesson, GradeLevel, UserRole, UserProfile } from './types/svt';
 import { calculateLevelFromXP, checkNewUnlockedBadges } from './utils/svtLogic';
 import { auth, onAuthStateChanged, db, handleFirestoreError, OperationType } from './firebase/config';
-import { doc, setDoc, getDocs, collection } from 'firebase/firestore';
+import {
+  ADMIN_EMAIL,
+  deleteLessonFromFirestore,
+  mergeLessonsWithCloud,
+  persistUserProgress,
+  saveLessonToFirestore,
+  saveQuizResultToFirestore,
+  syncUserProfileOnSignIn,
+} from './firebase/firestoreService';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { ShieldAlert } from 'lucide-react';
 
 export default function App() {
@@ -27,6 +36,7 @@ export default function App() {
   const [isPhoneMockup, setIsPhoneMockup] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
 
   const [userProfile, setUserProfile] = useState<UserProfile>(() => {
     try {
@@ -44,36 +54,67 @@ export default function App() {
       email: '',
       role: 'student',
       gradeLevel: '3AC',
+      preferredLanguage: 'fr',
       points: 120,
-      completedLessons: ['lesson_1ac_milieu_naturel'],
-      unlockedBadges: ['badge_first_quiz']
+      level: 1,
+      streakDays: 1,
+      badges: ['badge_first_quiz'],
+      completedLessonIds: ['lesson_1ac_milieu_naturel'],
+      quizScores: {},
+      subscriptionPlan: 'free',
+      subscriptionStatus: 'active',
     };
   });
 
-  // Track real Firebase Authentication state
+  // Track real Firebase Authentication state & hydrate Firestore UserProfile
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user: any) => {
+    const unsubscribe = onAuthStateChanged(auth, async (user: any) => {
       if (user) {
         setCurrentUser(user);
-        const isAdmin = user.email === 'ohdadmohamed77@gmail.com';
-        setUserProfile(prev => {
-          const next = {
+        setIsAuthReady(true);
+        try {
+          const persisted = await syncUserProfileOnSignIn(user, {
+            gradeLevel: selectedGrade,
+            preferredLanguage: language,
+            points,
+            completedLessonIds,
+            badges: unlockedBadges,
+          });
+
+          setUserProfile(persisted);
+          setRole(persisted.role);
+          if (persisted.gradeLevel) setSelectedGrade(persisted.gradeLevel);
+          if (persisted.preferredLanguage) setLanguage(persisted.preferredLanguage);
+          if (typeof persisted.points === 'number') {
+            setPoints(persisted.points);
+            localStorage.setItem('svt_points', String(persisted.points));
+          }
+          if (Array.isArray(persisted.completedLessonIds)) {
+            setCompletedLessonIds(persisted.completedLessonIds);
+            localStorage.setItem('svt_completed_lessons', JSON.stringify(persisted.completedLessonIds));
+          }
+          if (Array.isArray(persisted.badges)) {
+            setUnlockedBadges(persisted.badges);
+            localStorage.setItem('svt_badges', JSON.stringify(persisted.badges));
+          }
+          try {
+            localStorage.setItem('svt_user_profile', JSON.stringify(persisted));
+          } catch {}
+        } catch (err) {
+          console.warn('Firestore profile sync warning:', err);
+          const isAdmin = user.email === ADMIN_EMAIL && user.emailVerified;
+          setUserProfile(prev => ({
             ...prev,
             uid: user.uid,
             email: user.email || '',
             displayName: user.displayName || user.email?.split('@')[0] || prev.displayName,
             role: (isAdmin ? 'admin' : prev.role) as UserRole,
-          };
-          try {
-            localStorage.setItem('svt_user_profile', JSON.stringify(next));
-          } catch {}
-          return next;
-        });
-        if (isAdmin) {
-          setRole('admin');
+          }));
+          if (isAdmin) setRole('admin');
         }
       } else {
         setCurrentUser(null);
+        setIsAuthReady(true);
       }
     });
     return () => unsubscribe();
@@ -99,33 +140,47 @@ export default function App() {
     return MOROCCAN_SVT_LESSONS;
   });
 
-  // Try to load additional custom lessons from Firestore on mount
+  // Real-time Firestore lessons listener (only attached once Auth is ready & user signed in)
   useEffect(() => {
-    async function loadFirestoreLessons() {
-      try {
-        const snapshot = await getDocs(collection(db, 'lessons'));
-        if (!snapshot.empty) {
-          const cloudLessons: Lesson[] = [];
-          snapshot.forEach(docSnap => {
-            cloudLessons.push(docSnap.data() as Lesson);
-          });
-          if (cloudLessons.length > 0) {
-            setLessons(prev => {
-              const map = new Map<string, Lesson>();
-              prev.forEach(l => map.set(l.id, l));
-              cloudLessons.forEach(l => map.set(l.id, l));
-              return Array.from(map.values());
-            });
-          }
-        }
-      } catch (err) {
-        handleFirestoreError(err, OperationType.GET, 'lessons');
-      }
-    }
-    loadFirestoreLessons();
-  }, []);
+    if (!isAuthReady || !currentUser) return;
 
-  // Save lessons to LocalStorage and attempt Firestore sync
+    const isEmailAdmin =
+      currentUser.email === ADMIN_EMAIL && currentUser.emailVerified === true;
+    const lessonsQuery = isEmailAdmin
+      ? collection(db, 'lessons')
+      : query(collection(db, 'lessons'), where('status', '==', 'published'));
+
+    const unsubscribe = onSnapshot(
+      lessonsQuery,
+      snapshot => {
+        if (snapshot.empty) return;
+        const cloudLessons: Lesson[] = [];
+        snapshot.forEach(docSnap => {
+          cloudLessons.push(docSnap.data() as Lesson);
+        });
+        if (cloudLessons.length > 0) {
+          setLessons(prev => {
+            const merged = mergeLessonsWithCloud(prev, cloudLessons);
+            try {
+              localStorage.setItem('svt_college_pro_lessons', JSON.stringify(merged));
+            } catch {}
+            return merged;
+          });
+        }
+      },
+      err => {
+        try {
+          handleFirestoreError(err, OperationType.GET, 'lessons');
+        } catch (structuredErr) {
+          console.warn('Lessons snapshot listener notice:', structuredErr);
+        }
+      }
+    );
+
+    return () => unsubscribe();
+  }, [isAuthReady, currentUser]);
+
+  // Save lessons to LocalStorage and sync to Firestore when authenticated
   const saveLesson = async (updatedLesson: Lesson) => {
     setLessons(prev => {
       const exists = prev.some(l => l.id === updatedLesson.id);
@@ -140,15 +195,16 @@ export default function App() {
       return next;
     });
 
-    // Cloud Firestore Sync
-    try {
-      await setDoc(doc(db, 'lessons', updatedLesson.id), updatedLesson);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, `lessons/${updatedLesson.id}`);
+    if (currentUser?.uid && (role === 'admin' || role === 'teacher')) {
+      try {
+        await saveLessonToFirestore(updatedLesson);
+      } catch (err) {
+        console.warn('Firestore lesson save error:', err);
+      }
     }
   };
 
-  const deleteLesson = (lessonId: string) => {
+  const deleteLesson = async (lessonId: string) => {
     setLessons(prev => {
       const next = prev.filter(l => l.id !== lessonId);
       try {
@@ -158,6 +214,14 @@ export default function App() {
       }
       return next;
     });
+
+    if (currentUser?.uid && (role === 'admin' || role === 'teacher')) {
+      try {
+        await deleteLessonFromFirestore(lessonId);
+      } catch (err) {
+        console.warn('Firestore lesson delete error:', err);
+      }
+    }
   };
 
   const duplicateLesson = (lessonToDuplicate: Lesson) => {
@@ -221,24 +285,55 @@ export default function App() {
         gradeLevel: selectedGrade
       });
 
+      const mergedBadges = newBadges.length > 0 ? [...unlockedBadges, ...newBadges] : unlockedBadges;
       if (newBadges.length > 0) {
-        const merged = [...unlockedBadges, ...newBadges];
-        setUnlockedBadges(merged);
-        localStorage.setItem('svt_badges', JSON.stringify(merged));
+        setUnlockedBadges(mergedBadges);
+        localStorage.setItem('svt_badges', JSON.stringify(mergedBadges));
+      }
+
+      if (currentUser?.uid) {
+        persistUserProgress(currentUser.uid, {
+          points: newXP,
+          completedLessonIds: updated,
+          badges: mergedBadges,
+        }).catch(err => console.warn('Progress Firestore sync:', err));
       }
     }
   };
 
-  const handleQuizCompleted = (quizId: string, scoreOver20: number, xpEarned: number) => {
+  const handleQuizCompleted = (quizId: string, scoreOver20: number, xpEarned: number, resultPayload?: any) => {
     const newXP = points + xpEarned;
     setPoints(newXP);
     localStorage.setItem('svt_points', String(newXP));
+
+    const updatedScores = { ...(userProfile.quizScores || {}), [quizId]: scoreOver20 };
+    setUserProfile(prev => ({ ...prev, points: newXP, quizScores: updatedScores }));
+
+    if (currentUser?.uid) {
+      persistUserProgress(currentUser.uid, {
+        points: newXP,
+        quizScores: updatedScores,
+      }).catch(err => console.warn('Quiz XP Firestore sync:', err));
+
+      if (resultPayload) {
+        saveQuizResultToFirestore({
+          ...resultPayload,
+          studentId: currentUser.uid,
+          studentName: userProfile.displayName || currentUser.displayName || 'Élève SVT',
+        }).catch(err => console.warn('Quiz result Firestore save:', err));
+      }
+    }
   };
 
   const handleExperimentCompleted = (expId: string) => {
     const newXP = points + 40;
     setPoints(newXP);
     localStorage.setItem('svt_points', String(newXP));
+    if (currentUser?.uid) {
+      persistUserProgress(currentUser.uid, { points: newXP }).catch(err =>
+        console.warn('Experiment XP Firestore sync:', err)
+      );
+    }
   };
 
   const handleActivateFreeCode = (code: string) => {
@@ -246,6 +341,11 @@ export default function App() {
       const bonusXP = points + 200;
       setPoints(bonusXP);
       localStorage.setItem('svt_points', String(bonusXP));
+      if (currentUser?.uid) {
+        persistUserProgress(currentUser.uid, { points: bonusXP }).catch(err =>
+          console.warn('Voucher XP Firestore sync:', err)
+        );
+      }
       return true;
     }
     return false;
@@ -258,7 +358,12 @@ export default function App() {
         currentTab={currentTab}
         onSelectTab={setCurrentTab}
         selectedGrade={selectedGrade}
-        onSelectGrade={setSelectedGrade}
+        onSelectGrade={(lvl) => {
+          setSelectedGrade(lvl);
+          if (currentUser?.uid) {
+            persistUserProgress(currentUser.uid, { gradeLevel: lvl }).catch(() => {});
+          }
+        }}
         role={role}
         onSelectRole={(newRole) => {
           setRole(newRole);
@@ -269,7 +374,13 @@ export default function App() {
           });
         }}
         language={language}
-        onToggleLanguage={() => setLanguage(prev => (prev === 'fr' ? 'ar' : 'fr'))}
+        onToggleLanguage={() => {
+          const nextLang = language === 'fr' ? 'ar' : 'fr';
+          setLanguage(nextLang);
+          if (currentUser?.uid) {
+            persistUserProgress(currentUser.uid, { preferredLanguage: nextLang }).catch(() => {});
+          }
+        }}
         isPhoneMockup={isPhoneMockup}
         onTogglePhoneMockup={() => setIsPhoneMockup(!isPhoneMockup)}
         points={points}
@@ -361,6 +472,9 @@ export default function App() {
             ) : (
               <TeacherPortal
                 language={language}
+                currentUser={currentUser}
+                teacherName={userProfile.displayName}
+                role={role}
               />
             )
           )}

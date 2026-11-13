@@ -45,7 +45,7 @@ export interface ScientificDiagram {
 
 export interface MediaAttachment {
   id: string;
-  type: 'image' | 'pdf' | 'video';
+  type: 'image' | 'pdf' | 'ppt' | 'video';
   title: string;
   titleAr?: string;
   url: string;

@@ -5,7 +5,7 @@ import {
   Sparkles, Layers, ListPlus, ShieldCheck, Download, Upload,
   Image, Video, FileDown, CheckSquare, HelpCircle, EyeOff,
   FolderTree, Calendar, Lock, Unlock, Database, Loader2,
-  AlertTriangle, FileUp
+  AlertTriangle, FileUp, Presentation
 } from 'lucide-react';
 import { Lesson, GradeLevel, Definition, ScientificDiagram, MediaAttachment, QuizQuestion } from '../types/svt';
 
@@ -151,6 +151,15 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
   };
 
   const handleSave = (forcedStatus?: 'published' | 'draft' | 'archived') => {
+    if (isAnalyzingPdf) {
+      alert(
+        isAr
+          ? 'جاري تحليل الوثيقة حالياً، يرجى الانتظار لحظة...'
+          : 'Analyse du document en cours, veuillez patienter un instant avant d\'enregistrer.'
+      );
+      return;
+    }
+
     if (!formData.title.trim()) {
       alert(
         isAr
@@ -187,11 +196,23 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
     }, 1300);
   };
 
-  // Smart PDF Course Import
+  // Smart PDF & PowerPoint (PPT / PPTX) Course Import
   const handleSmartPdfImport = async (file: File) => {
     if (!file) return;
-    if (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf') {
-      alert(isAr ? 'يرجى اختيار ملف بصيغة PDF فقط' : 'Veuillez sélectionner un fichier au format PDF uniquement.');
+    const lowerName = file.name.toLowerCase();
+    const isPdfFile = lowerName.endsWith('.pdf') || file.type === 'application/pdf';
+    const isPptFile =
+      lowerName.endsWith('.ppt') ||
+      lowerName.endsWith('.pptx') ||
+      file.type === 'application/vnd.ms-powerpoint' ||
+      file.type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+
+    if (!isPdfFile && !isPptFile) {
+      alert(
+        isAr
+          ? 'يرجى اختيار ملف بصيغة PDF أو PowerPoint (.ppt / .pptx) فقط'
+          : 'Veuillez sélectionner un fichier au format PDF ou PowerPoint (.ppt, .pptx) uniquement.'
+      );
       return;
     }
 
@@ -213,11 +234,11 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
 
       setPdfImportProgress(55);
 
-      const response = await fetch('/api/parse-pdf', {
+      const response = await fetch('/api/parse-document', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          pdfBase64: base64Data,
+          fileBase64: base64Data,
           filename: file.name
         })
       });
@@ -231,19 +252,29 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
       const result = await response.json();
       setPdfImportProgress(100);
 
-      const pdfAttachment: MediaAttachment = {
-        id: `med_pdf_${Date.now()}`,
-        type: 'pdf',
+      const detectedType: 'pdf' | 'ppt' = result.fileType === 'ppt' || isPptFile ? 'ppt' : 'pdf';
+      const slideOrPageCount = result.slideCount || result.pageCount || 1;
+      const sizeMb = (file.size / (1024 * 1024)).toFixed(2);
+
+      const docAttachment: MediaAttachment = {
+        id: `med_${detectedType}_${Date.now()}`,
+        type: detectedType,
         title: file.name.replace(/\.[^/.]+$/, ''),
         titleAr: file.name.replace(/\.[^/.]+$/, ''),
         url: base64Data,
-        description: `Document PDF officiel (${(file.size / (1024 * 1024)).toFixed(2)} Mo)`
+        description:
+          detectedType === 'ppt'
+            ? `Présentation PowerPoint (${lowerName.endsWith('.pptx') ? 'PPTX' : 'PPT'} • ${slideOrPageCount} diapositives • ${sizeMb} Mo)`
+            : `Document PDF officiel (${slideOrPageCount} pages • ${sizeMb} Mo)`
       };
 
       const extracted = result.extracted || {};
-      const isScanned = Boolean(result.isScanned || !result.hasText || !extracted.title?.trim());
+      const proposedTitle = (extracted.title || '').trim();
+      const proposedTitleAr = (extracted.titleAr || proposedTitle).trim();
+      const isScanned = Boolean(result.isScanned || !result.hasText);
+      const needsManualTitle = !proposedTitle;
 
-      setPdfScannedWarning(isScanned);
+      setPdfScannedWarning(isScanned || needsManualTitle);
 
       const newLessonData: Lesson = {
         ...emptyLesson,
@@ -254,13 +285,19 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
         themeTitleAr: extracted.themeTitleAr || emptyLesson.themeTitleAr,
         chapterTitle: extracted.chapterTitle || emptyLesson.chapterTitle,
         chapterTitleAr: extracted.chapterTitleAr || emptyLesson.chapterTitleAr,
-        title: isScanned ? '' : (extracted.title || ''),
-        titleAr: isScanned ? '' : (extracted.titleAr || extracted.title || ''),
-        summary: extracted.summary || (isScanned ? '' : 'Synthèse pédagogique du document PDF importé.'),
-        summaryAr: extracted.summaryAr || (isScanned ? '' : 'خلاصة بيداغوجية للوثيقة المستوردة.'),
+        title: proposedTitle,
+        titleAr: proposedTitleAr,
+        summary:
+          extracted.summary ||
+          (needsManualTitle
+            ? ''
+            : detectedType === 'ppt'
+            ? 'Synthèse pédagogique de la présentation PowerPoint importée.'
+            : 'Synthèse pédagogique du document PDF importé.'),
+        summaryAr: extracted.summaryAr || (needsManualTitle ? '' : 'خلاصة بيداغوجية للوثيقة المستوردة.'),
         objectives: Array.isArray(extracted.objectives) && extracted.objectives.length > 0 ? extracted.objectives : emptyLesson.objectives,
         objectivesAr: Array.isArray(extracted.objectivesAr) && extracted.objectivesAr.length > 0 ? extracted.objectivesAr : emptyLesson.objectivesAr,
-        mediaAttachments: [pdfAttachment],
+        mediaAttachments: [docAttachment],
         status: 'draft', // CRITICAL: ALWAYS draft so admin validates first before publishing!
         isPremium: false,
         estimatedMinutes: 30
@@ -269,17 +306,25 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
       setFormData(newLessonData);
       setIsEditingExisting(false);
 
-      if (isScanned) {
+      const docTypeLabel = detectedType === 'ppt' ? 'PowerPoint' : 'PDF';
+
+      if (needsManualTitle) {
         setPdfAnalysisNotice(
           isAr
-            ? '⚠️ تم استيراد وثيقة PDF ولكنها ممسوحة ضوئياً (بدون نص رقمي قابل للاستخراج). تم إرفاق الملف الأصلي للتنزيل بنجاح. يرجى إدخال عنوان الدرس ومعلومات الوحدة يدوياً أدناه قبل الحفظ.'
-            : '⚠️ Document PDF scanné : Aucun texte numérique extrait. Le fichier PDF est attaché pour le téléchargement. Veuillez saisir manuellement le titre du cours et vérifier les informations ci-dessous.'
+            ? `⚠️ تم استيراد ملف ${docTypeLabel} ولكن بدون نص أو عنوان قابل للاستخراج. تم إرفاق الملف الأصلي للتنزيل. يرجى إدخال عنوان الدرس يدوياً أدناه قبل الحفظ.`
+            : `⚠️ Document ${docTypeLabel} sans texte ni titre identifiable : le fichier original est attaché pour le téléchargement. Veuillez saisir manuellement le titre du cours en français ci-dessous.`
+        );
+      } else if (isScanned) {
+        setPdfAnalysisNotice(
+          isAr
+            ? `⚠️ ملف ${docTypeLabel} بدون نص رقمي، لكن تم اقتراح العنوان التالي تلقائياً: "${proposedTitle}" (${extracted.gradeLevel}، الدورة ${extracted.semester}). يرجى المراجعة والتعديل قبل النشر.`
+            : `⚠️ Document ${docTypeLabel} sans texte extrait, mais le titre "${proposedTitle}" a été proposé (${extracted.gradeLevel}, Semestre ${extracted.semester}). Vérifiez et validez avant publication.`
         );
       } else {
         setPdfAnalysisNotice(
           isAr
-            ? `✓ تم استيراد وتحليل الدرس بنجاح: "${extracted.title}" (المستوى: ${extracted.gradeLevel}، الدورة: ${extracted.semester}). تم إعداده كمسودة للمراجعة والتعديل قبل النشر.`
-            : `✓ Extraction intelligente réussie : Titre "${extracted.title}" détecté (${extracted.gradeLevel}, Semestre ${extracted.semester}). Le cours est ouvert en mode brouillon pour validation avant publication.`
+            ? `✓ تم استيراد وتحليل عرض/ملف ${docTypeLabel} بنجاح: "${proposedTitle}" (المستوى: ${extracted.gradeLevel}، الدورة: ${extracted.semester}). تم إعداده كمسودة للمراجعة قبل النشر.`
+            : `✓ Extraction intelligente ${docTypeLabel} réussie : Titre "${proposedTitle}" détecté (${extracted.gradeLevel}, Semestre ${extracted.semester}). Le cours est ouvert en mode brouillon pour validation avant publication.`
         );
       }
 
@@ -287,8 +332,8 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
       setActiveTab('info');
       setIsEditorOpen(true);
     } catch (err: any) {
-      console.error('Erreur import PDF:', err);
-      alert(isAr ? 'حدث خطأ أثناء معالجة ملف PDF. يرجى التأكد من سلامة الملف.' : `Échec de l'analyse automatique du PDF : ${err.message || 'Erreur'}.`);
+      console.error('Erreur import document:', err);
+      alert(isAr ? 'حدث خطأ أثناء معالجة الملف. يرجى التأكد من سلامة الملف.' : `Échec de l'analyse automatique du document : ${err.message || 'Erreur'}.`);
     } finally {
       setIsAnalyzingPdf(false);
       setPdfImportProgress(0);
@@ -358,13 +403,30 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
     });
   };
 
-  const handleAddMedia = (type: 'image' | 'pdf' | 'video') => {
+  const handleAddMedia = (type: 'image' | 'pdf' | 'ppt' | 'video') => {
     const newMedia: MediaAttachment = {
       id: `med_${Date.now()}`,
       type,
-      title: type === 'pdf' ? 'Document / Fiche PDF' : type === 'video' ? 'Vidéo Explicative' : 'Image / Schéma',
-      titleAr: type === 'pdf' ? 'وثيقة PDF علمية' : type === 'video' ? 'فيديو توضيحي' : 'صورة أو رسم بياني',
-      url: type === 'video' ? 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' : 'https://images.unsplash.com/photo-1507668077129-56e32842fceb?auto=format&fit=crop&w=800&q=80',
+      title:
+        type === 'pdf'
+          ? 'Document / Fiche PDF'
+          : type === 'ppt'
+          ? 'Présentation PowerPoint'
+          : type === 'video'
+          ? 'Vidéo Explicative'
+          : 'Image / Schéma',
+      titleAr:
+        type === 'pdf'
+          ? 'وثيقة PDF علمية'
+          : type === 'ppt'
+          ? 'عرض تقديمي PowerPoint'
+          : type === 'video'
+          ? 'فيديو توضيحي'
+          : 'صورة أو رسم بياني',
+      url:
+        type === 'video'
+          ? 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+          : 'https://images.unsplash.com/photo-1507668077129-56e32842fceb?auto=format&fit=crop&w=800&q=80',
       description: 'Description du document attaché...'
     };
     setFormData({
@@ -373,8 +435,9 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
     });
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, type: 'image' | 'pdf') => {
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, type: 'image' | 'pdf' | 'ppt') => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
 
     const reader = new FileReader();
@@ -393,39 +456,54 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
         mediaAttachments: [...(prev.mediaAttachments || []), newMedia]
       }));
 
-      // If PDF and title is empty, trigger smart auto-fill
-      if (type === 'pdf' && !formData.title.trim()) {
+      // If PDF or PowerPoint (PPT/PPTX), trigger smart extraction to auto-fill title/metadata if not yet entered
+      if (type === 'pdf' || type === 'ppt') {
+        const docLabel = type === 'ppt' ? 'PowerPoint' : 'PDF';
+        setIsAnalyzingPdf(true);
         try {
-          const res = await fetch('/api/parse-pdf', {
+          const res = await fetch('/api/parse-document', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pdfBase64: result, filename: file.name })
+            body: JSON.stringify({ fileBase64: result, filename: file.name })
           });
           if (res.ok) {
             const data = await res.json();
-            if (data.extracted?.title) {
+            const extractedTitle = (data.extracted?.title || '').trim();
+            const isScanned = Boolean(data.isScanned || !data.hasText);
+
+            if (extractedTitle) {
               setFormData(prev => ({
                 ...prev,
-                title: prev.title || data.extracted.title,
-                titleAr: prev.titleAr || data.extracted.titleAr || data.extracted.title,
+                title: prev.title.trim() ? prev.title : extractedTitle,
+                titleAr: prev.titleAr.trim() ? prev.titleAr : (data.extracted.titleAr || extractedTitle),
                 gradeLevel: prev.gradeLevel || data.extracted.gradeLevel || '3AC',
                 semester: prev.semester || data.extracted.semester || 1,
-                themeTitle: prev.themeTitle || data.extracted.themeTitle,
-                themeTitleAr: prev.themeTitleAr || data.extracted.themeTitleAr,
-                chapterTitle: prev.chapterTitle || data.extracted.chapterTitle,
-                chapterTitleAr: prev.chapterTitleAr || data.extracted.chapterTitleAr,
-                summary: prev.summary || data.extracted.summary,
-                summaryAr: prev.summaryAr || data.extracted.summaryAr
+                themeTitle: prev.themeTitle === emptyLesson.themeTitle && data.extracted.themeTitle ? data.extracted.themeTitle : prev.themeTitle,
+                themeTitleAr: prev.themeTitleAr === emptyLesson.themeTitleAr && data.extracted.themeTitleAr ? data.extracted.themeTitleAr : prev.themeTitleAr,
+                chapterTitle: prev.chapterTitle === emptyLesson.chapterTitle && data.extracted.chapterTitle ? data.extracted.chapterTitle : prev.chapterTitle,
+                chapterTitleAr: prev.chapterTitleAr === emptyLesson.chapterTitleAr && data.extracted.chapterTitleAr ? data.extracted.chapterTitleAr : prev.chapterTitleAr,
+                summary: prev.summary.trim() ? prev.summary : (data.extracted.summary || prev.summary),
+                summaryAr: prev.summaryAr.trim() ? prev.summaryAr : (data.extracted.summaryAr || prev.summaryAr)
               }));
+              setPdfScannedWarning(isScanned);
               setPdfAnalysisNotice(
                 isAr
-                  ? `✓ تم تحديد عنوان الدرس تلقائياً من ملف الـ PDF: "${data.extracted.title}"`
-                  : `✓ Titre détecté automatiquement depuis le document PDF : "${data.extracted.title}"`
+                  ? `✓ تم تحديد عنوان الدرس تلقائياً من ملف ${docLabel}: "${extractedTitle}"`
+                  : `✓ Titre détecté automatiquement depuis le document ${docLabel} : "${extractedTitle}"`
+              );
+            } else {
+              setPdfScannedWarning(true);
+              setPdfAnalysisNotice(
+                isAr
+                  ? `⚠️ ملف ${docLabel} بدون عنوان قابل للاستخراج. يرجى إدخال عنوان الدرس في علامة التبويب 1.`
+                  : `⚠️ Document ${docLabel} sans titre détectable : veuillez saisir le titre du cours dans l'onglet 1 (Infos).`
               );
             }
           }
         } catch (err) {
           console.warn('Auto-extract title silent fallback:', err);
+        } finally {
+          setIsAnalyzingPdf(false);
         }
       }
     };
@@ -480,8 +558,8 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
             </h2>
             <p className="text-slate-300 text-sm mt-1 max-w-2xl">
               {isAr
-                ? 'أضف مئات الدروس والتمارين لجميع المستويات (1AC, 2AC, 3AC) مقسمة بالدورات والوحدات، مع الصور وملفات PDF والفيديوهات والتقويمات، وحفظها فورياً للعموم.'
-                : 'Créez, modifiez, classez par semestre et unité, attachez des PDF, vidéos, schémas et exercices corrigés avec synchronisation immédiate pour les élèves.'}
+                ? 'أضف مئات الدروس والتمارين لجميع المستويات (1AC, 2AC, 3AC) مقسمة بالدورات والوحدات، مع الصور وملفات PDF و PowerPoint والفيديوهات والتقويمات، وحفظها فورياً للعموم.'
+                : 'Créez, modifiez, classez par semestre et unité, attachez des PDF, présentations PowerPoint (PPT/PPTX), vidéos, schémas et exercices corrigés avec synchronisation immédiate pour les élèves.'}
             </p>
           </div>
 
@@ -491,7 +569,7 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
               className="px-4 py-3 rounded-xl bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-700 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-sm shadow-lg shadow-blue-500/25 flex items-center gap-2 transition-all hover:scale-[1.02] active:scale-[0.98]"
             >
               <FileUp className="w-5 h-5" />
-              {isAr ? '📥 استيراد ذكي لدرس PDF' : '📥 Importer Cours PDF'}
+              {isAr ? '📥 استيراد ذكي (PDF / PPT)' : '📥 Importer Cours PDF / PPT'}
             </button>
 
             <button
@@ -769,7 +847,7 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
                 }`}
               >
                 <Image className="w-3.5 h-3.5" />
-                4. {isAr ? 'الصور وملفات PDF والفيديو' : 'Médias, PDF & Vidéos'} ({formData.mediaAttachments?.length || 0})
+                4. {isAr ? 'الصور، PDF، PowerPoint والفيديو' : 'Médias, PDF, PPT & Vidéos'} ({formData.mediaAttachments?.length || 0})
               </button>
               <button
                 onClick={() => setActiveTab('exercises')}
@@ -1221,14 +1299,14 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
                 </div>
               )}
 
-              {/* TAB 4 : MEDIA, PDF & VIDEOS */}
+              {/* TAB 4 : MEDIA, PDF, PPT & VIDEOS */}
               {activeTab === 'media' && (
                 <div className="space-y-4">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <p className="text-xs text-slate-400">
                       {isAr
-                        ? 'أرفق ملفات PDF للشعب، صور توضيحية علمية، أو روابط فيديو من يوتيوب.'
-                        : 'Ajoutez des schémas, documents PDF de cours ou vidéos scientifiques YouTube.'}
+                        ? 'أرفق ملفات PDF أو عروض PowerPoint (.ppt / .pptx)، صور توضيحية علمية، أو روابط فيديو من يوتيوب.'
+                        : 'Ajoutez des schémas, documents PDF, présentations PowerPoint (PPT/PPTX) ou vidéos scientifiques YouTube.'}
                     </p>
                     <div className="flex flex-wrap items-center gap-1.5">
                       <label className="px-2.5 py-1.5 rounded-lg bg-blue-500/20 text-blue-300 hover:bg-blue-500/30 text-xs font-semibold inline-flex items-center gap-1 border border-blue-500/30 cursor-pointer">
@@ -1243,13 +1321,40 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
                       </label>
 
                       <label className="px-2.5 py-1.5 rounded-lg bg-rose-500/20 text-rose-300 hover:bg-rose-500/30 text-xs font-semibold inline-flex items-center gap-1 border border-rose-500/30 cursor-pointer">
-                        <FileDown className="w-3.5 h-3.5" />
-                        <span>{isAr ? '+ ملف PDF' : '+ Téléverser PDF'}</span>
+                        {isAnalyzingPdf ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <FileDown className="w-3.5 h-3.5" />
+                        )}
+                        <span>
+                          {isAnalyzingPdf
+                            ? (isAr ? 'جاري التحليل...' : 'Analyse...')
+                            : (isAr ? '+ ملف PDF' : '+ Téléverser PDF')}
+                        </span>
                         <input
                           type="file"
-                          accept="application/pdf"
+                          accept="application/pdf,.pdf"
                           className="hidden"
                           onChange={(e) => handleFileUpload(e, 'pdf')}
+                        />
+                      </label>
+
+                      <label className="px-2.5 py-1.5 rounded-lg bg-orange-500/20 text-orange-300 hover:bg-orange-500/30 text-xs font-semibold inline-flex items-center gap-1 border border-orange-500/30 cursor-pointer">
+                        {isAnalyzingPdf ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Presentation className="w-3.5 h-3.5" />
+                        )}
+                        <span>
+                          {isAnalyzingPdf
+                            ? (isAr ? 'جاري التحليل...' : 'Analyse...')
+                            : (isAr ? '+ عرض PPT / PPTX' : '+ Téléverser PPT / PPTX')}
+                        </span>
+                        <input
+                          type="file"
+                          accept=".ppt,.pptx,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                          className="hidden"
+                          onChange={(e) => handleFileUpload(e, 'ppt')}
                         />
                       </label>
 
@@ -1275,9 +1380,10 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
                           <div className="flex items-center justify-between border-b border-slate-700 pb-1.5">
                             <span className="text-xs font-bold flex items-center gap-1.5 text-cyan-400">
                               {med.type === 'pdf' && <FileDown className="w-4 h-4 text-rose-400" />}
+                              {med.type === 'ppt' && <Presentation className="w-4 h-4 text-orange-400" />}
                               {med.type === 'video' && <Video className="w-4 h-4 text-amber-400" />}
                               {med.type === 'image' && <Image className="w-4 h-4 text-blue-400" />}
-                              Pièce #{idx + 1} ({med.type.toUpperCase()})
+                              Pièce #{idx + 1} ({med.type === 'ppt' ? 'PPT / PPTX' : med.type.toUpperCase()})
                             </span>
                             <button
                               type="button"
@@ -1308,7 +1414,7 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
                                 updated[idx].url = e.target.value;
                                 setFormData({ ...formData, mediaAttachments: updated });
                               }}
-                              placeholder="URL du fichier (Image, PDF ou Vidéo)..."
+                              placeholder="URL du fichier (Image, PDF, PPT ou Vidéo)..."
                               className="w-full px-3 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs text-cyan-300 font-mono"
                             />
                           </div>
@@ -1510,7 +1616,7 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
         </div>
       )}
 
-      {/* ==================== SMART PDF IMPORT MODAL ==================== */}
+      {/* ==================== SMART PDF & POWERPOINT IMPORT MODAL ==================== */}
       {isPdfImportModalOpen && (
         <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto">
           <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
@@ -1522,10 +1628,10 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-white">
-                    {isAr ? 'استيراد ذكي لدرس SVT من ملف PDF' : 'Importation Intelligente de Cours PDF'}
+                    {isAr ? 'استيراد ذكي لدرس SVT (PDF / PowerPoint)' : 'Importation Intelligente de Cours (PDF / PPT)'}
                   </h3>
                   <p className="text-xs text-slate-400">
-                    {isAr ? 'استخراج تلقائي للعنوان والمستوى والتنظيم المغربي' : 'Détection automatique du titre, niveau (1AC, 2AC, 3AC) et semestre'}
+                    {isAr ? 'استخراج تلقائي للعنوان والمستوى والتنظيم المغربي من ملفات PDF أو PPT / PPTX' : 'Détection automatique du titre, niveau (1AC, 2AC, 3AC) et semestre (PDF, PPT, PPTX)'}
                   </p>
                 </div>
               </div>
@@ -1550,7 +1656,7 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
                   </div>
                   <div>
                     <h4 className="text-sm font-bold text-white">
-                      {isAr ? 'جاري تحليل الوثيقة واستخراج المعلومات البيداغوجية...' : 'Analyse pédagogique du document PDF en cours...'}
+                      {isAr ? 'جاري تحليل الوثيقة واستخراج المعلومات البيداغوجية...' : 'Analyse pédagogique du document en cours...'}
                     </h4>
                     <p className="text-xs text-slate-400 mt-1">
                       {isAr ? 'التعرف على المقرر الدراسي المغربي، المستوى، وعنوان الدرس' : 'Reconnaissance du programme SVT marocain, du niveau et du titre du cours'}
@@ -1573,17 +1679,18 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
                       <FileUp className="w-7 h-7" />
                     </div>
                     <span className="text-sm font-bold text-white block">
-                      {isAr ? 'انقر لاختيار ملف PDF أو اسحبه إلى هنا' : 'Cliquez pour sélectionner un PDF ou glissez-le ici'}
+                      {isAr ? 'انقر لاختيار ملف PDF أو PowerPoint (.ppt / .pptx) أو اسحبه إلى هنا' : 'Cliquez pour sélectionner un PDF ou PowerPoint (.ppt, .pptx)'}
                     </span>
                     <span className="text-xs text-slate-400 block mt-1">
-                      {isAr ? 'يدعم وثائق الدروس الرسمية حتى 40 ميغابايت' : 'Fiches de cours, manuels ou résumés SVT jusqu\'à 40 Mo'}
+                      {isAr ? 'يدعم وثائق الدروس وعروض الشرائح حتى 40 ميغابايت' : 'Fiches PDF ou présentations PowerPoint (.ppt, .pptx) jusqu\'à 40 Mo'}
                     </span>
                     <input
                       type="file"
-                      accept="application/pdf,.pdf"
+                      accept=".pdf,.ppt,.pptx,application/pdf,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation"
                       className="hidden"
                       onChange={(e) => {
                         const file = e.target.files?.[0];
+                        e.target.value = '';
                         if (file) handleSmartPdfImport(file);
                       }}
                     />
@@ -1611,16 +1718,16 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
                       <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
                       <span>
                         {isAr
-                          ? 'حفظ ملف الـ PDF الأصلي ليكون متاحاً لتنزيل التلاميذ وقراءته بجودة عالية.'
-                          : 'Conservation du PDF original dans les pièces jointes pour téléchargement direct par les élèves.'}
+                          ? 'حفظ ملف الـ PDF أو PowerPoint الأصلي ليكون متاحاً لتنزيل التلاميذ بجودة عالية.'
+                          : 'Conservation du fichier original (PDF, PPT ou PPTX) dans les pièces jointes pour téléchargement direct par les élèves.'}
                       </span>
                     </div>
                     <div className="flex items-start gap-2 text-amber-300/90">
                       <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                       <span>
                         {isAr
-                          ? 'الوثائق الممسوحة ضوئياً (Scannées) مدعومة بالكامل، مع إمكانية إدخال العنوان يدوياً بسهولة.'
-                          : 'Les PDF scannés sont acceptés : vous saisissez simplement le titre à la main sans blocage.'}
+                          ? 'الوثائق الممسوحة ضوئياً أو العروض المصورة مدعومة بالكامل، مع إمكانية إدخال العنوان يدوياً بسهولة.'
+                          : 'Les PDF scannés et présentations imagées sont acceptés : vous saisissez simplement le titre à la main sans blocage.'}
                       </span>
                     </div>
                   </div>

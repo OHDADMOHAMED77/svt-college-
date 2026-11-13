@@ -39,8 +39,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       const result = await signInWithPopup(auth, googleProvider);
       const user = result.user;
 
-      // Check if user is the admin from system metadata
-      const isAdmin = user.email === 'ohdadmohamed77@gmail.com';
+      const isAdmin = user.email === 'ohdadmohamed77@gmail.com' && user.emailVerified;
       onUpdateProfile({
         uid: user.uid,
         email: user.email || '',
@@ -50,11 +49,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       onClose();
     } catch (err: any) {
       console.warn('Firebase popup sign-in note:', err?.message);
-      setAuthError(
-        isAr
-          ? 'تعذر الاتصال المباشر بحساب Google (يمكنك تسجيل الدخول بالنمط التجريبي السريع أدناه).'
-          : 'Connexion Google indisponible dans cette iframe sandbox. Utilisez le mode compte express ci-dessous.'
-      );
+      const code = err?.code || '';
+      if (code === 'auth/popup-closed-by-user') {
+        setAuthError(
+          isAr
+            ? 'تم إغلاق نافذة تسجيل الدخول قبل إتمام العملية.'
+            : 'Fenêtre de connexion Google fermée avant confirmation.'
+        );
+      } else {
+        setAuthError(
+          isAr
+            ? 'تعذر فتح نافذة Google (تحقق من السماح للنوافذ المنبثقة أو استخدم الحساب السريع أدناه).'
+            : 'Impossible d\'ouvrir la fenêtre Google (autorisez les popups ou utilisez le profil rapide ci-dessous).'
+        );
+      }
     } finally {
       setIsLoading(false);
     }
@@ -64,7 +72,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     try {
       await signOut(auth);
       onUpdateProfile({
-        uid: `guest_${Date.now()}`,
+        uid: 'guest_student',
         email: '',
         displayName: isAr ? 'تلميذ زائر' : 'Élève Invité',
         role: 'student'
@@ -102,8 +110,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           </h3>
           <p className="text-xs text-slate-400">
             {isAr
-              ? 'مصادقة آمنة عبر Firebase مع فصل كامل للأدوار (تلميذ، أستاذ، مشرف)'
-              : 'Authentification sécurisée avec séparation stricte des rôles (Élève, Enseignant, Admin)'}
+              ? 'مصادقة آمنة عبر Google و Firebase مع مزامنة التقدم في Firestore'
+              : 'Authentification Google Firebase sécurisée et sauvegarde cloud Firestore'}
           </p>
         </div>
 
@@ -121,15 +129,21 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <div className="min-w-0">
                 <h4 className="text-sm font-bold text-white truncate">{userProfile.displayName}</h4>
                 <p className="text-xs text-slate-400 truncate">{currentUser.email || userProfile.email || 'Compte local'}</p>
-                <span className={`inline-block px-2 py-0.5 mt-1 rounded text-[10px] font-bold ${
-                  userProfile.role === 'admin' ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30' :
-                  userProfile.role === 'teacher' ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30' :
-                  'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                }`}>
-                  {userProfile.role === 'admin' ? (isAr ? '🛡️ مشرف المنصة' : '🛡️ Administrateur') :
-                   userProfile.role === 'teacher' ? (isAr ? '👨‍🏫 أستاذ المادة' : '👨‍🏫 Enseignant') :
-                   (isAr ? '👤 تلميذ مسجل' : '👤 Élève')}
-                </span>
+                <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                  <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${
+                    userProfile.role === 'admin' ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30' :
+                    userProfile.role === 'teacher' ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30' :
+                    'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                  }`}>
+                    {userProfile.role === 'admin' ? (isAr ? '🛡️ مشرف المنصة' : '🛡️ Administrateur') :
+                     userProfile.role === 'teacher' ? (isAr ? '👨‍🏫 أستاذ المادة' : '👨‍🏫 Enseignant') :
+                     (isAr ? '👤 تلميذ مسجل' : '👤 Élève')}
+                  </span>
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+                    <CheckCircle2 className="w-3 h-3" />
+                    {isAr ? 'مزامن مع Firestore' : 'Synchronisé Firestore'}
+                  </span>
+                </div>
               </div>
             </div>
 
@@ -147,7 +161,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <button
               onClick={handleGoogleSignIn}
               disabled={isLoading}
-              className="w-full py-3 px-4 rounded-xl bg-white hover:bg-slate-100 text-slate-900 text-xs font-bold flex items-center justify-center gap-3 shadow-md transition-all active:scale-[0.98]"
+              className="w-full py-3 px-4 rounded-xl bg-white hover:bg-slate-100 disabled:opacity-60 text-slate-900 text-xs font-bold flex items-center justify-center gap-3 shadow-md transition-all active:scale-[0.98]"
             >
               <svg className="w-4 h-4" viewBox="0 0 24 24">
                 <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
@@ -155,7 +169,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
                 <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
               </svg>
-              <span>{isAr ? 'تسجيل الدخول بحساب Google' : 'Continuer avec Google (Firebase)'}</span>
+              <span>
+                {isLoading
+                  ? (isAr ? 'جاري الاتصال بـ Google...' : 'Connexion à Google...')
+                  : (isAr ? 'تسجيل الدخول بحساب Google' : 'Continuer avec Google (Firebase)')}
+              </span>
             </button>
 
             {authError && (
@@ -164,11 +182,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               </p>
             )}
 
-            <div className="relative flex items-center justify-center">
-              <div className="border-t border-slate-800 w-full" />
-              <span className="bg-slate-900 px-3 text-[11px] text-slate-500 font-semibold uppercase shrink-0">
+            <div className="flex items-center gap-3">
+              <div className="border-t border-slate-800 flex-1" />
+              <span className="text-[11px] text-slate-500 font-semibold uppercase shrink-0">
                 {isAr ? 'أو تخصيص الحساب المحلي' : 'Ou mode profil direct'}
               </span>
+              <div className="border-t border-slate-800 flex-1" />
             </div>
 
             {/* Direct Profile Role Customization */}

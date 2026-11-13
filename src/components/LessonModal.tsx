@@ -266,37 +266,57 @@ export const LessonModal: React.FC<LessonModalProps> = ({
             </div>
           )}
 
-          {/* Attached Media (PDF, Images, Videos) */}
+          {/* Attached Media (PDF, PPT, Images, Videos) */}
           {lesson.mediaAttachments && lesson.mediaAttachments.length > 0 && (
             <div className="space-y-3">
               <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
                 {isAr ? 'الموارد والوثائق الملحقة' : 'Documents & Ressources Attachés'}
               </h3>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {lesson.mediaAttachments.map((med, idx) => (
-                  <div key={idx} className="bg-slate-800/80 border border-slate-700 p-3.5 rounded-xl flex items-center justify-between gap-3">
-                    <div className="space-y-0.5 min-w-0">
-                      <span className="text-[10px] font-bold text-cyan-400 uppercase">
-                        {med.type}
-                      </span>
-                      <h4 className="text-xs font-bold text-white truncate">
-                        {isAr ? (med.titleAr || med.title) : med.title}
-                      </h4>
-                      {med.description && (
-                        <p className="text-[11px] text-slate-400 truncate">{med.description}</p>
-                      )}
+                {lesson.mediaAttachments.map((med, idx) => {
+                  const isPpt = med.type === 'ppt';
+                  const isPdf = med.type === 'pdf';
+                  const safeName = (med.title || 'cours').replace(/[^\w\u00C0-\u017F-]+/g, '_');
+                  const downloadName = isPpt
+                    ? `${safeName}.${med.url.includes('presentationml') ? 'pptx' : 'ppt'}`
+                    : isPdf
+                    ? `${safeName}.pdf`
+                    : undefined;
+
+                  return (
+                    <div key={idx} className="bg-slate-800/80 border border-slate-700 p-3.5 rounded-xl flex items-center justify-between gap-3">
+                      <div className="space-y-0.5 min-w-0">
+                        <span
+                          className={`text-[10px] font-bold uppercase ${
+                            isPpt ? 'text-orange-400' : isPdf ? 'text-rose-400' : 'text-cyan-400'
+                          }`}
+                        >
+                          {isPpt ? 'POWERPOINT (PPT / PPTX)' : med.type}
+                        </span>
+                        <h4 className="text-xs font-bold text-white truncate">
+                          {isAr ? (med.titleAr || med.title) : med.title}
+                        </h4>
+                        {med.description && (
+                          <p className="text-[11px] text-slate-400 truncate">{med.description}</p>
+                        )}
+                      </div>
+                      <a
+                        href={med.url}
+                        target={isPpt ? undefined : '_blank'}
+                        rel={isPpt ? undefined : 'noopener noreferrer'}
+                        download={downloadName}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold shrink-0 inline-flex items-center gap-1 ${
+                          isPpt
+                            ? 'bg-orange-500/20 hover:bg-orange-500/30 text-orange-300'
+                            : 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300'
+                        }`}
+                      >
+                        <span>{isPpt ? (isAr ? 'تحميل PPT' : 'Télécharger') : (isAr ? 'فتح' : 'Ouvrir')}</span>
+                        <ExternalLink className="w-3.5 h-3.5" />
+                      </a>
                     </div>
-                    <a
-                      href={med.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 text-xs font-semibold shrink-0 inline-flex items-center gap-1"
-                    >
-                      <span>{isAr ? 'فتح' : 'Ouvrir'}</span>
-                      <ExternalLink className="w-3.5 h-3.5" />
-                    </a>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}

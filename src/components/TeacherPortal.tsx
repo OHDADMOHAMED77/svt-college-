@@ -1,15 +1,24 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Users, Plus, Key, BookOpen, Award, CheckCircle, BarChart3,
   Download, Clock, ArrowRight, Check, Sparkles, UserCheck
 } from 'lucide-react';
-import { ClassRoom, GradeLevel } from '../types/svt';
+import { ClassRoom, GradeLevel, UserRole } from '../types/svt';
+import { loadClassesFromFirestore, saveClassToFirestore } from '../firebase/firestoreService';
 
 interface TeacherPortalProps {
   language: 'fr' | 'ar';
+  currentUser?: any;
+  teacherName?: string;
+  role?: UserRole;
 }
 
-export const TeacherPortal: React.FC<TeacherPortalProps> = ({ language }) => {
+export const TeacherPortal: React.FC<TeacherPortalProps> = ({
+  language,
+  currentUser,
+  teacherName,
+  role
+}) => {
   const isAr = language === 'ar';
 
   const [classes, setClasses] = useState<ClassRoom[]>([
@@ -39,11 +48,30 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({ language }) => {
     }
   ]);
 
+  useEffect(() => {
+    if (!currentUser?.uid) return;
+    let active = true;
+    loadClassesFromFirestore(currentUser.uid, role === 'admin')
+      .then(cloudClasses => {
+        if (!active || cloudClasses.length === 0) return;
+        setClasses(prev => {
+          const map = new Map<string, ClassRoom>();
+          prev.forEach(c => map.set(c.id, c));
+          cloudClasses.forEach(c => map.set(c.id, c));
+          return Array.from(map.values());
+        });
+      })
+      .catch(err => console.warn('Classes Firestore sync skipped:', err));
+    return () => {
+      active = false;
+    };
+  }, [currentUser?.uid, role]);
+
   const [isCreatingClass, setIsCreatingClass] = useState(false);
   const [newClassName, setNewClassName] = useState('');
   const [newClassGrade, setNewClassGrade] = useState<GradeLevel>('3AC');
 
-  const handleCreateClass = () => {
+  const handleCreateClass = async () => {
     if (!newClassName.trim()) return;
     const randomCode = `SVT-${newClassGrade}${Math.floor(100 + Math.random() * 900)}`;
     const newClass: ClassRoom = {
@@ -52,8 +80,8 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({ language }) => {
       gradeLevel: newClassGrade,
       academicYear: '2025/2026',
       accessCode: randomCode,
-      teacherId: 'teacher_1',
-      teacherName: 'Prof. Enseignant SVT',
+      teacherId: currentUser?.uid || 'teacher_1',
+      teacherName: teacherName || 'Prof. Enseignant SVT',
       studentsCount: 0,
       activeQuizzesCount: 0,
       averageScore: 0
@@ -61,6 +89,14 @@ export const TeacherPortal: React.FC<TeacherPortalProps> = ({ language }) => {
     setClasses([...classes, newClass]);
     setNewClassName('');
     setIsCreatingClass(false);
+
+    if (currentUser?.uid) {
+      try {
+        await saveClassToFirestore(newClass);
+      } catch (err) {
+        console.warn('Class Firestore save note:', err);
+      }
+    }
   };
 
   return (

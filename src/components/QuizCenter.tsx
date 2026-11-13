@@ -5,13 +5,13 @@ import {
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { MOROCCAN_SVT_QUIZZES, MOROCCAN_EXAMENS_BLANCS } from '../data/moroccanSvtCurriculum';
-import { Quiz, QuizQuestion, GradeLevel } from '../types/svt';
+import { Quiz, QuizQuestion, QuizResult, GradeLevel } from '../types/svt';
 import { calculateQuizScore, calculateEarnedXP } from '../utils/svtLogic';
 
 interface QuizCenterProps {
   initialQuizId?: string;
   gradeLevel: GradeLevel;
-  onQuizCompleted: (quizId: string, scoreOver20: number, xpEarned: number) => void;
+  onQuizCompleted: (quizId: string, scoreOver20: number, xpEarned: number, resultPayload?: Omit<QuizResult, 'studentId' | 'studentName'>) => void;
   language: 'fr' | 'ar';
 }
 
@@ -85,7 +85,19 @@ export const QuizCenter: React.FC<QuizCenterProps> = ({
       }
     }
 
-    onQuizCompleted(currentQuiz.id, scoreData.scoreOver20, earnedXP);
+    const timeSpent = Math.max(1, currentQuiz.durationMinutes * 60 - timeLeftSeconds);
+    onQuizCompleted(currentQuiz.id, scoreData.scoreOver20, earnedXP, {
+      id: `res_${Date.now()}`,
+      quizId: currentQuiz.id,
+      quizTitle: currentQuiz.title,
+      gradeLevel: currentQuiz.gradeLevel,
+      score: scoreData.scoreOver20,
+      percentage: scoreData.percentage,
+      passed: scoreData.passed,
+      timeSpentSeconds: timeSpent,
+      completedAt: new Date().toISOString(),
+      answers: userAnswers,
+    });
   };
 
   const scoreResult = isSubmitted ? calculateQuizScore(currentQuiz.questions, userAnswers) : null;
