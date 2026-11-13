@@ -150,32 +150,58 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
     setIsEditorOpen(true);
   };
 
+  const buildFallbackTitleFromFile = (filename: string, gradeLevel: GradeLevel, docType: 'pdf' | 'ppt' | 'image' = 'pdf'): string => {
+    const cleaned = filename
+      .replace(/\.[^/.]+$/, '')
+      .replace(/[_\-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (cleaned.length >= 2) {
+      return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+    }
+    return docType === 'ppt'
+      ? `Présentation SVT ${gradeLevel}`
+      : `Cours SVT ${gradeLevel} (PDF)`;
+  };
+
+  const resolveLessonTitle = (lesson: Lesson): string => {
+    const manual = (lesson.title || '').trim();
+    if (manual) return manual;
+
+    const docAttachment = (lesson.mediaAttachments || []).find(
+      att => att.type === 'pdf' || att.type === 'ppt' || (att.title && att.title.trim())
+    );
+    if (docAttachment?.title?.trim()) {
+      return docAttachment.title.trim();
+    }
+
+    const arabicTitle = (lesson.titleAr || '').trim();
+    if (arabicTitle) return arabicTitle;
+
+    return `Cours SVT ${lesson.gradeLevel || '3AC'}`;
+  };
+
   const handleSave = (forcedStatus?: 'published' | 'draft' | 'archived') => {
     if (isAnalyzingPdf) {
-      alert(
+      setPdfAnalysisNotice(
         isAr
-          ? 'جاري تحليل الوثيقة حالياً، يرجى الانتظار لحظة...'
-          : 'Analyse du document en cours, veuillez patienter un instant avant d\'enregistrer.'
+          ? 'جاري تحليل الوثيقة حالياً، يرجى الانتظار لحظة ثم إعادة الحفظ.'
+          : 'Analyse du document en cours, veuillez patienter une seconde puis cliquer à nouveau.'
       );
       return;
     }
 
-    if (!formData.title.trim()) {
-      alert(
-        isAr
-          ? 'يرجى إدخال عنوان الدرس باللغة الفرنسية (مطلوب قبل الحفظ)'
-          : 'Veuillez saisir au moins le titre du cours en français (requis avant enregistrement).'
-      );
-      setActiveTab('info');
-      return;
-    }
-
+    const resolvedTitle = resolveLessonTitle(formData);
+    const resolvedTitleAr = (formData.titleAr || '').trim() || resolvedTitle;
     const finalStatus = forcedStatus || formData.status || 'published';
     const lessonToSave: Lesson = {
       ...formData,
+      title: resolvedTitle,
+      titleAr: resolvedTitleAr,
       status: finalStatus
     };
 
+    setFormData(lessonToSave);
     onSaveLesson(lessonToSave);
 
     const isDraft = finalStatus === 'draft';
@@ -224,8 +250,11 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
     setIsAnalyzingPdf(true);
     setPdfImportProgress(25);
 
+    const detectedFallbackType: 'pdf' | 'ppt' = isPptFile ? 'ppt' : 'pdf';
+    let base64Data = '';
+
     try {
-      const base64Data = await new Promise<string>((resolve, reject) => {
+      base64Data = await new Promise<string>((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result as string);
         reader.onerror = reject;
@@ -234,33 +263,40 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
 
       setPdfImportProgress(55);
 
-      const response = await fetch('/api/parse-document', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fileBase64: base64Data,
-          filename: file.name
-        })
-      });
-
-      setPdfImportProgress(85);
-
-      if (!response.ok) {
-        throw new Error(`Erreur serveur (${response.status})`);
+      let result: any = null;
+      try {
+        const response = await fetch('/api/parse-document', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fileBase64: base64Data,
+            filename: file.name
+          })
+        });
+        if (response.ok) {
+          result = await response.json();
+        }
+      } catch (parseNetworkErr) {
+        console.warn('Document parser fallback triggered:', parseNetworkErr);
       }
 
-      const result = await response.json();
       setPdfImportProgress(100);
 
-      const detectedType: 'pdf' | 'ppt' = result.fileType === 'ppt' || isPptFile ? 'ppt' : 'pdf';
-      const slideOrPageCount = result.slideCount || result.pageCount || 1;
+      const detectedType: 'pdf' | 'ppt' =
+        result?.fileType === 'ppt' || isPptFile ? 'ppt' : 'pdf';
+      const slideOrPageCount = result?.slideCount || result?.pageCount || 1;
       const sizeMb = (file.size / (1024 * 1024)).toFixed(2);
+      const fallbackFileTitle = buildFallbackTitleFromFile(
+        file.name,
+        (result?.extracted?.gradeLevel as GradeLevel) || '3AC',
+        detectedType
+      );
 
       const docAttachment: MediaAttachment = {
         id: `med_${detectedType}_${Date.now()}`,
         type: detectedType,
-        title: file.name.replace(/\.[^/.]+$/, ''),
-        titleAr: file.name.replace(/\.[^/.]+$/, ''),
+        title: file.name.replace(/\.[^/.]+$/, '') || fallbackFileTitle,
+        titleAr: file.name.replace(/\.[^/.]+$/, '') || fallbackFileTitle,
         url: base64Data,
         description:
           detectedType === 'ppt'
@@ -268,13 +304,13 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
             : `Document PDF officiel (${slideOrPageCount} pages • ${sizeMb} Mo)`
       };
 
-      const extracted = result.extracted || {};
-      const proposedTitle = (extracted.title || '').trim();
+      const extracted = result?.extracted || {};
+      const extractedTitle = (extracted.title || '').trim();
+      const proposedTitle = extractedTitle || fallbackFileTitle;
       const proposedTitleAr = (extracted.titleAr || proposedTitle).trim();
-      const isScanned = Boolean(result.isScanned || !result.hasText);
-      const needsManualTitle = !proposedTitle;
+      const isScanned = Boolean(!result || result.isScanned || !result.hasText);
 
-      setPdfScannedWarning(isScanned || needsManualTitle);
+      setPdfScannedWarning(isScanned && !extractedTitle);
 
       const newLessonData: Lesson = {
         ...emptyLesson,
@@ -283,22 +319,20 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
         semester: (extracted.semester as (1 | 2)) || 1,
         themeTitle: extracted.themeTitle || emptyLesson.themeTitle,
         themeTitleAr: extracted.themeTitleAr || emptyLesson.themeTitleAr,
-        chapterTitle: extracted.chapterTitle || emptyLesson.chapterTitle,
-        chapterTitleAr: extracted.chapterTitleAr || emptyLesson.chapterTitleAr,
+        chapterTitle: extracted.chapterTitle || `Chapitre : ${proposedTitle}`,
+        chapterTitleAr: extracted.chapterTitleAr || `الفصل : ${proposedTitleAr}`,
         title: proposedTitle,
         titleAr: proposedTitleAr,
         summary:
           extracted.summary ||
-          (needsManualTitle
-            ? ''
-            : detectedType === 'ppt'
+          (detectedType === 'ppt'
             ? 'Synthèse pédagogique de la présentation PowerPoint importée.'
-            : 'Synthèse pédagogique du document PDF importé.'),
-        summaryAr: extracted.summaryAr || (needsManualTitle ? '' : 'خلاصة بيداغوجية للوثيقة المستوردة.'),
+            : 'Support de cours PDF prêt pour consultation et téléchargement par les élèves.'),
+        summaryAr: extracted.summaryAr || 'وثيقة درس مطابقة للمنهاج المغربي جاهزة للعرض والتحميل.',
         objectives: Array.isArray(extracted.objectives) && extracted.objectives.length > 0 ? extracted.objectives : emptyLesson.objectives,
         objectivesAr: Array.isArray(extracted.objectivesAr) && extracted.objectivesAr.length > 0 ? extracted.objectivesAr : emptyLesson.objectivesAr,
         mediaAttachments: [docAttachment],
-        status: 'draft', // CRITICAL: ALWAYS draft so admin validates first before publishing!
+        status: 'draft', // Toujours ouvert en brouillon pour validation avant publication
         isPremium: false,
         estimatedMinutes: 30
       };
@@ -308,23 +342,23 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
 
       const docTypeLabel = detectedType === 'ppt' ? 'PowerPoint' : 'PDF';
 
-      if (needsManualTitle) {
+      if (!extractedTitle) {
         setPdfAnalysisNotice(
           isAr
-            ? `⚠️ تم استيراد ملف ${docTypeLabel} ولكن بدون نص أو عنوان قابل للاستخراج. تم إرفاق الملف الأصلي للتنزيل. يرجى إدخال عنوان الدرس يدوياً أدناه قبل الحفظ.`
-            : `⚠️ Document ${docTypeLabel} sans texte ni titre identifiable : le fichier original est attaché pour le téléchargement. Veuillez saisir manuellement le titre du cours en français ci-dessous.`
+            ? `✓ تم قبول وإرفاق ملف ${docTypeLabel} بنجاح بعنوان تلقائي: "${proposedTitle}". يمكنك تعديل العنوان أو النشر مباشرة.`
+            : `✓ Document ${docTypeLabel} accepté et attaché avec le titre "${proposedTitle}". Vous pouvez le modifier ou l'enregistrer directement.`
         );
       } else if (isScanned) {
         setPdfAnalysisNotice(
           isAr
-            ? `⚠️ ملف ${docTypeLabel} بدون نص رقمي، لكن تم اقتراح العنوان التالي تلقائياً: "${proposedTitle}" (${extracted.gradeLevel}، الدورة ${extracted.semester}). يرجى المراجعة والتعديل قبل النشر.`
-            : `⚠️ Document ${docTypeLabel} sans texte extrait, mais le titre "${proposedTitle}" a été proposé (${extracted.gradeLevel}, Semestre ${extracted.semester}). Vérifiez et validez avant publication.`
+            ? `✓ تم قبول ملف ${docTypeLabel} واقتراح العنوان: "${proposedTitle}" (${newLessonData.gradeLevel}، الدورة ${newLessonData.semester}).`
+            : `✓ Document ${docTypeLabel} accepté avec le titre proposé "${proposedTitle}" (${newLessonData.gradeLevel}, Semestre ${newLessonData.semester}).`
         );
       } else {
         setPdfAnalysisNotice(
           isAr
-            ? `✓ تم استيراد وتحليل عرض/ملف ${docTypeLabel} بنجاح: "${proposedTitle}" (المستوى: ${extracted.gradeLevel}، الدورة: ${extracted.semester}). تم إعداده كمسودة للمراجعة قبل النشر.`
-            : `✓ Extraction intelligente ${docTypeLabel} réussie : Titre "${proposedTitle}" détecté (${extracted.gradeLevel}, Semestre ${extracted.semester}). Le cours est ouvert en mode brouillon pour validation avant publication.`
+            ? `✓ تم استيراد وتحليل عرض/ملف ${docTypeLabel} بنجاح: "${proposedTitle}" (المستوى: ${newLessonData.gradeLevel}، الدورة: ${newLessonData.semester}). تم إعداده كمسودة للمراجعة قبل النشر.`
+            : `✓ Extraction intelligente ${docTypeLabel} réussie : Titre "${proposedTitle}" détecté (${newLessonData.gradeLevel}, Semestre ${newLessonData.semester}). Le cours est ouvert en mode brouillon pour validation avant publication.`
         );
       }
 
@@ -332,8 +366,13 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
       setActiveTab('info');
       setIsEditorOpen(true);
     } catch (err: any) {
-      console.error('Erreur import document:', err);
-      alert(isAr ? 'حدث خطأ أثناء معالجة الملف. يرجى التأكد من سلامة الملف.' : `Échec de l'analyse automatique du document : ${err.message || 'Erreur'}.`);
+      console.error('Erreur lecture fichier document:', err);
+      const fallbackTitle = buildFallbackTitleFromFile(file.name, '3AC', detectedFallbackType);
+      setPdfAnalysisNotice(
+        isAr
+          ? `⚠️ تعذر قراءة الملف محلياً. يمكنك إعادة المحاولة أو حفظ الدرس بالعنوان "${fallbackTitle}".`
+          : `⚠️ Impossible de lire le fichier localement (${err?.message || 'Erreur'}).`
+      );
     } finally {
       setIsAnalyzingPdf(false);
       setPdfImportProgress(0);
@@ -443,20 +482,25 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
     const reader = new FileReader();
     reader.onload = async () => {
       const result = reader.result as string;
+      const fallbackTitle = buildFallbackTitleFromFile(file.name, formData.gradeLevel || '3AC', type);
+      const cleanName = file.name.replace(/\.[^/.]+$/, "") || fallbackTitle;
       const newMedia: MediaAttachment = {
         id: `med_${Date.now()}`,
         type,
-        title: file.name.replace(/\.[^/.]+$/, ""),
-        titleAr: file.name.replace(/\.[^/.]+$/, ""),
+        title: cleanName,
+        titleAr: cleanName,
         url: result,
         description: `${file.name} (${(file.size / 1024).toFixed(1)} Ko)`
       };
+
       setFormData(prev => ({
         ...prev,
+        title: prev.title.trim() ? prev.title : fallbackTitle,
+        titleAr: prev.titleAr.trim() ? prev.titleAr : fallbackTitle,
         mediaAttachments: [...(prev.mediaAttachments || []), newMedia]
       }));
 
-      // If PDF or PowerPoint (PPT/PPTX), trigger smart extraction to auto-fill title/metadata if not yet entered
+      // If PDF or PowerPoint (PPT/PPTX), trigger smart extraction to refine title/metadata
       if (type === 'pdf' || type === 'ppt') {
         const docLabel = type === 'ppt' ? 'PowerPoint' : 'PDF';
         setIsAnalyzingPdf(true);
@@ -469,36 +513,36 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
           if (res.ok) {
             const data = await res.json();
             const extractedTitle = (data.extracted?.title || '').trim();
+            const finalTitle = extractedTitle || fallbackTitle;
             const isScanned = Boolean(data.isScanned || !data.hasText);
 
-            if (extractedTitle) {
-              setFormData(prev => ({
+            setFormData(prev => {
+              const shouldReplaceFallback =
+                !prev.title.trim() || prev.title === fallbackTitle;
+              return {
                 ...prev,
-                title: prev.title.trim() ? prev.title : extractedTitle,
-                titleAr: prev.titleAr.trim() ? prev.titleAr : (data.extracted.titleAr || extractedTitle),
-                gradeLevel: prev.gradeLevel || data.extracted.gradeLevel || '3AC',
-                semester: prev.semester || data.extracted.semester || 1,
-                themeTitle: prev.themeTitle === emptyLesson.themeTitle && data.extracted.themeTitle ? data.extracted.themeTitle : prev.themeTitle,
-                themeTitleAr: prev.themeTitleAr === emptyLesson.themeTitleAr && data.extracted.themeTitleAr ? data.extracted.themeTitleAr : prev.themeTitleAr,
-                chapterTitle: prev.chapterTitle === emptyLesson.chapterTitle && data.extracted.chapterTitle ? data.extracted.chapterTitle : prev.chapterTitle,
-                chapterTitleAr: prev.chapterTitleAr === emptyLesson.chapterTitleAr && data.extracted.chapterTitleAr ? data.extracted.chapterTitleAr : prev.chapterTitleAr,
-                summary: prev.summary.trim() ? prev.summary : (data.extracted.summary || prev.summary),
-                summaryAr: prev.summaryAr.trim() ? prev.summaryAr : (data.extracted.summaryAr || prev.summaryAr)
-              }));
-              setPdfScannedWarning(isScanned);
-              setPdfAnalysisNotice(
-                isAr
-                  ? `✓ تم تحديد عنوان الدرس تلقائياً من ملف ${docLabel}: "${extractedTitle}"`
-                  : `✓ Titre détecté automatiquement depuis le document ${docLabel} : "${extractedTitle}"`
-              );
-            } else {
-              setPdfScannedWarning(true);
-              setPdfAnalysisNotice(
-                isAr
-                  ? `⚠️ ملف ${docLabel} بدون عنوان قابل للاستخراج. يرجى إدخال عنوان الدرس في علامة التبويب 1.`
-                  : `⚠️ Document ${docLabel} sans titre détectable : veuillez saisir le titre du cours dans l'onglet 1 (Infos).`
-              );
-            }
+                title: shouldReplaceFallback ? finalTitle : prev.title,
+                titleAr:
+                  !prev.titleAr.trim() || prev.titleAr === fallbackTitle
+                    ? (data.extracted?.titleAr || finalTitle)
+                    : prev.titleAr,
+                gradeLevel: prev.gradeLevel || data.extracted?.gradeLevel || '3AC',
+                semester: prev.semester || data.extracted?.semester || 1,
+                themeTitle: prev.themeTitle === emptyLesson.themeTitle && data.extracted?.themeTitle ? data.extracted.themeTitle : prev.themeTitle,
+                themeTitleAr: prev.themeTitleAr === emptyLesson.themeTitleAr && data.extracted?.themeTitleAr ? data.extracted.themeTitleAr : prev.themeTitleAr,
+                chapterTitle: prev.chapterTitle === emptyLesson.chapterTitle && data.extracted?.chapterTitle ? data.extracted.chapterTitle : prev.chapterTitle,
+                chapterTitleAr: prev.chapterTitleAr === emptyLesson.chapterTitleAr && data.extracted?.chapterTitleAr ? data.extracted.chapterTitleAr : prev.chapterTitleAr,
+                summary: prev.summary.trim() ? prev.summary : (data.extracted?.summary || prev.summary),
+                summaryAr: prev.summaryAr.trim() ? prev.summaryAr : (data.extracted?.summaryAr || prev.summaryAr)
+              };
+            });
+
+            setPdfScannedWarning(isScanned && !extractedTitle);
+            setPdfAnalysisNotice(
+              isAr
+                ? `✓ تم قبول وإرفاق ملف ${docLabel} بعنوان "${finalTitle}"`
+                : `✓ Document ${docLabel} accepté et attaché (${finalTitle}).`
+            );
           }
         } catch (err) {
           console.warn('Auto-extract title silent fallback:', err);
