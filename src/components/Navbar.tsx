@@ -2,7 +2,7 @@ import React from 'react';
 import {
   BookOpen, FlaskConical, Award, Bot, Users, ShieldCheck,
   Smartphone, Monitor, Globe, Sparkles, GraduationCap, ChevronDown,
-  User, LogIn
+  User, LogIn, FileSearch
 } from 'lucide-react';
 import { GradeLevel, UserRole } from '../types/svt';
 
@@ -50,6 +50,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'lab', labelFr: 'Labo Virtuel', labelAr: 'المختبر الافتراضي', icon: FlaskConical },
     { id: 'quiz', labelFr: 'Quiz & Examens', labelAr: 'التقويمات والامتحانات', icon: Award },
     { id: 'ai', labelFr: 'Tuteur IA', labelAr: 'المساعد الذكي', icon: Bot },
+    { id: 'pdf-ai', labelFr: 'Studio PDF', labelAr: 'PDF الذكي', icon: FileSearch },
     ...(role === 'teacher' || role === 'admin'
       ? [{ id: 'teacher', labelFr: 'Enseignant', labelAr: 'فضاء الأستاذ', icon: Users }]
       : []),
@@ -60,8 +61,8 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   return (
     <header className="sticky top-0 z-40 bg-slate-900/95 backdrop-blur-md border-b border-slate-800 text-white">
-      <div className="max-w-7xl mx-auto px-3 sm:px-6">
-        <div className="flex items-center justify-between h-16 gap-2">
+      <div className="max-w-[1400px] mx-auto px-3 sm:px-5">
+        <div className="flex items-center justify-between h-16 gap-2 overflow-hidden">
           {/* Brand Logo */}
           <div
             onClick={() => onSelectTab('courses')}
@@ -94,13 +95,13 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <button
                   key={item.id}
                   onClick={() => onSelectTab(item.id)}
-                  className={`px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all ${
+                  className={`px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all whitespace-nowrap shrink-0 ${
                     isActive
                       ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 shadow-sm shadow-emerald-500/10'
                       : 'text-slate-400 hover:text-slate-100 hover:bg-slate-800/60'
                   }`}
                 >
-                  <Icon className="w-4 h-4" />
+                  <Icon className="w-4 h-4 shrink-0" />
                   <span>{isAr ? item.labelAr : item.labelFr}</span>
                 </button>
               );
@@ -187,14 +188,14 @@ export const Navbar: React.FC<NavbarProps> = ({
               }`}>
                 {userName.charAt(0).toUpperCase()}
               </div>
-              <span className="hidden lg:inline-block max-w-[90px] truncate">{userName}</span>
+              <span className="hidden lg:inline-block max-w-[82px] truncate">{userName}</span>
             </button>
 
             {/* Gamification Points Pill */}
-            <div className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-bold">
-              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+            <div className="hidden xl:flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-bold whitespace-nowrap shrink-0 tabular-nums">
+              <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
               <span>{points} XP</span>
-              <span className="text-[10px] text-amber-400/70 font-normal">Niv. {level}</span>
+              <span className="hidden 2xl:inline text-[10px] text-amber-400/70 font-normal">Niv. {level}</span>
             </div>
           </div>
         </div>

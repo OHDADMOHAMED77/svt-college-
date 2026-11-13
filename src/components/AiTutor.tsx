@@ -9,9 +9,10 @@ import { GradeLevel } from '../types/svt';
 interface AiTutorProps {
   gradeLevel: GradeLevel;
   language: 'fr' | 'ar';
+  onOpenPdfStudio?: () => void;
 }
 
-export const AiTutor: React.FC<AiTutorProps> = ({ gradeLevel, language }) => {
+export const AiTutor: React.FC<AiTutorProps> = ({ gradeLevel, language, onOpenPdfStudio }) => {
   const isAr = language === 'ar';
   const [prompt, setPrompt] = useState('');
   const [mode, setMode] = useState<'explain' | 'quiz' | 'fiche' | 'general'>('explain');
@@ -111,6 +112,15 @@ export const AiTutor: React.FC<AiTutorProps> = ({ gradeLevel, language }) => {
             >
               {isAr ? 'توليد تمرين' : 'Exercice'}
             </button>
+            {onOpenPdfStudio && (
+              <button
+                onClick={onOpenPdfStudio}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                <span>{isAr ? 'قراءة PDF وإنفوغرافيك' : 'Studio PDF & Infographies'}</span>
+              </button>
+            )}
           </div>
         </div>
       </div>

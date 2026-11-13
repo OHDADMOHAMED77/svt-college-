@@ -51,9 +51,9 @@ async function extractPptxContent(buffer) {
     const lines = [];
     for (const para of paragraphs) {
       const textRuns = [...para.matchAll(/<a:t[^>]*>([\s\S]*?)<\/a:t>/gi)].map((m) => decodeXmlEntities(m[1])).join("");
-      const cleanLine = textRuns.replace(/\s+/g, " ").trim();
-      if (cleanLine) {
-        lines.push(cleanLine);
+      const cleanLine2 = textRuns.replace(/\s+/g, " ").trim();
+      if (cleanLine2) {
+        lines.push(cleanLine2);
       }
     }
     if (lines.length > 0) {
@@ -661,6 +661,286 @@ function extractImagesFromPdfBuffer(buffer, maxImages = 10) {
   return results;
 }
 
+// server/pdfAiEngine.ts
+function cleanLine(line) {
+  return line.replace(/\s+/g, " ").trim();
+}
+function detectGrade(text, filename) {
+  const combined = `${filename} ${text.slice(0, 3e3)}`.toLowerCase();
+  if (/\b1\s*ac\b|1ère\s*année|1ere\s*annee|milieu\s*naturel|cellule|respiration/.test(combined)) {
+    return "1AC";
+  }
+  if (/\b2\s*ac\b|2ème\s*année|2eme\s*annee|tectonique|séisme|seisme|volcan|reproduction/.test(combined)) {
+    return "2AC";
+  }
+  return "3AC";
+}
+function extractFirstMarkdownTable(rawText) {
+  const lines = rawText.replace(/\r\n?/g, "\n").split("\n");
+  for (let i = 0; i < lines.length - 1; i++) {
+    const line = lines[i].trim();
+    if (!line.includes("|")) continue;
+    const block = [];
+    let j = i;
+    while (j < lines.length && lines[j].trim().includes("|")) {
+      block.push(lines[j].trim());
+      j++;
+    }
+    if (block.length >= 2) {
+      const parseRow = (r) => r.replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim()).filter((_, idx, arr) => !(arr.length === 1 && arr[0] === ""));
+      const isSep = (r) => /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?$/.test(r);
+      const headers = parseRow(block[0]).slice(0, 4);
+      const rows = block.slice(isSep(block[1]) ? 2 : 1).filter((r) => !isSep(r)).map((r) => parseRow(r).slice(0, 4)).filter((r) => r.length >= 2).slice(0, 5);
+      if (headers.length >= 2 && rows.length >= 1) {
+        return { headers, rows };
+      }
+    }
+  }
+  return null;
+}
+function buildFallbackPdfAnalysis(rawText, filename, pageCount = 1, imageCount = 0) {
+  const cleanName = filename.replace(/\.[^/.]+$/, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+  const lines = rawText.replace(/\r\n?/g, "\n").split("\n").map(cleanLine).filter((l) => l.length > 0 && !/^page\s+\d+/i.test(l) && !/^---+\s*page/i.test(l));
+  const headingPattern = /^(?:[IVX]+\.\s+|\d+[.)]\s+|chapitre\s+\d+|unité\s+\d+|partie\s+\d+)/i;
+  const headings = lines.filter((l) => headingPattern.test(l) && l.length <= 100);
+  const proseLines = lines.filter(
+    (l) => !l.includes("|") && l.length >= 24 && !headingPattern.test(l)
+  );
+  const detectedTitle = lines.find((l) => l.length >= 6 && l.length <= 95 && !l.includes("|")) || cleanName || "Document de cours SVT";
+  const gradeLevel = detectGrade(rawText, filename);
+  const glossary = [];
+  for (const line of lines) {
+    if (glossary.length >= 4) break;
+    const match = line.match(/^([A-ZÀ-ÿ][^:]{2,42})\s*:\s*(.{15,220})$/);
+    if (match && !/^(à retenir|remarque|exemple|objectif|chapitre|partie|nb)/i.test(match[1])) {
+      glossary.push({
+        term: match[1].trim(),
+        termAr: match[1].trim(),
+        definition: match[2].trim(),
+        definitionAr: match[2].trim()
+      });
+    }
+  }
+  if (glossary.length === 0) {
+    glossary.push({
+      term: "Notions essentielles",
+      termAr: "\u0627\u0644\u0645\u0641\u0627\u0647\u064A\u0645 \u0627\u0644\u0623\u0633\u0627\u0633\u064A\u0629",
+      definition: proseLines[0] || `Concepts scientifiques cl\xE9s extraits du document ${detectedTitle}.`,
+      definitionAr: proseLines[0] || `\u0627\u0644\u0645\u0641\u0627\u0647\u064A\u0645 \u0627\u0644\u0639\u0644\u0645\u064A\u0629 \u0627\u0644\u0645\u0633\u062A\u062E\u0644\u0635\u0629 \u0645\u0646 \u0648\u062B\u064A\u0642\u0629 ${detectedTitle}.`
+    });
+  }
+  const tableFromPdf = extractFirstMarkdownTable(rawText);
+  const comparisonTable = tableFromPdf ? {
+    headers: tableFromPdf.headers,
+    headersAr: tableFromPdf.headers,
+    rows: tableFromPdf.rows,
+    rowsAr: tableFromPdf.rows
+  } : {
+    headers: ["Axe du document", "Observation / M\xE9canisme", "\xC0 retenir"],
+    headersAr: ["\u0645\u062D\u0648\u0631 \u0627\u0644\u0648\u062B\u064A\u0642\u0629", "\u0627\u0644\u0645\u0644\u0627\u062D\u0638\u0629 / \u0627\u0644\u0622\u0644\u064A\u0629", "\u0627\u0644\u062E\u0644\u0627\u0635\u0629"],
+    rows: (headings.length > 0 ? headings : [detectedTitle, "Analyse scientifique", "Synth\xE8se"]).slice(0, 3).map((h, i) => [
+      h.slice(0, 48),
+      (proseLines[i] || "\xC9tude des m\xE9canismes et donn\xE9es exp\xE9rimentales").slice(0, 70),
+      (proseLines[i + 1] || "Validation de la notion du programme SVT").slice(0, 60)
+    ]),
+    rowsAr: (headings.length > 0 ? headings : [detectedTitle, "\u0627\u0644\u062A\u062D\u0644\u064A\u0644 \u0627\u0644\u0639\u0644\u0645\u064A", "\u0627\u0644\u062E\u0644\u0627\u0635\u0629"]).slice(0, 3).map((h, i) => [
+      h.slice(0, 48),
+      (proseLines[i] || "\u062F\u0631\u0627\u0633\u0629 \u0627\u0644\u0638\u0648\u0627\u0647\u0631 \u0648\u0627\u0644\u0645\u0639\u0637\u064A\u0627\u062A \u0627\u0644\u062A\u062C\u0631\u064A\u0628\u064A\u0629").slice(0, 70),
+      (proseLines[i + 1] || "\u0627\u0633\u062A\u062E\u0644\u0627\u0635 \u0627\u0644\u0642\u0627\u0639\u062F\u0629 \u0627\u0644\u0639\u0644\u0645\u064A\u0629 \u0644\u0644\u0645\u0642\u0631\u0631").slice(0, 60)
+    ])
+  };
+  const outline = (headings.length > 0 ? headings.slice(0, 5) : [detectedTitle]).map(
+    (h, idx) => ({
+      heading: h,
+      headingAr: h,
+      keyPoints: proseLines.slice(idx * 2, idx * 2 + 2).length > 0 ? proseLines.slice(idx * 2, idx * 2 + 2) : [`Synth\xE8se de la section ${idx + 1}`],
+      keyPointsAr: proseLines.slice(idx * 2, idx * 2 + 2).length > 0 ? proseLines.slice(idx * 2, idx * 2 + 2) : [`\u062E\u0644\u0627\u0635\u0629 \u0627\u0644\u0645\u062D\u0648\u0631 ${idx + 1}`]
+    })
+  );
+  const stepCandidates = (headings.length >= 2 ? headings : proseLines).slice(0, 4);
+  const processSteps = stepCandidates.length > 0 ? stepCandidates.map((item, idx) => ({
+    stepNumber: idx + 1,
+    title: item.slice(0, 52),
+    titleAr: item.slice(0, 52),
+    description: (proseLines[idx] || item).slice(0, 120),
+    descriptionAr: (proseLines[idx] || item).slice(0, 120)
+  })) : [
+    {
+      stepNumber: 1,
+      title: "Observation initiale",
+      titleAr: "\u0627\u0644\u0645\u0644\u0627\u062D\u0638\u0629 \u0627\u0644\u0623\u0648\u0644\u064A\u0629",
+      description: `Analyse du document ${detectedTitle}.`,
+      descriptionAr: `\u062A\u062D\u0644\u064A\u0644 \u0645\u0639\u0637\u064A\u0627\u062A \u0648\u062B\u064A\u0642\u0629 ${detectedTitle}.`
+    },
+    {
+      stepNumber: 2,
+      title: "Interpr\xE9tation scientifique",
+      titleAr: "\u0627\u0644\u062A\u0641\u0633\u064A\u0631 \u0627\u0644\u0639\u0644\u0645\u064A",
+      description: "Mise en relation des faits et m\xE9canismes biologiques ou g\xE9ologiques.",
+      descriptionAr: "\u0631\u0628\u0637 \u0627\u0644\u0645\u0639\u0637\u064A\u0627\u062A \u0627\u0644\u062A\u062C\u0631\u064A\u0628\u064A\u0629 \u0628\u0627\u0644\u0622\u0644\u064A\u0627\u062A \u0627\u0644\u0639\u0644\u0645\u064A\u0629."
+    },
+    {
+      stepNumber: 3,
+      title: "Bilan \xE0 retenir",
+      titleAr: "\u0627\u0644\u062D\u0635\u064A\u0644\u0629 \u0627\u0644\u0645\u0639\u0631\u0641\u064A\u0629",
+      description: "Formulation de la conclusion conforme au programme SVT.",
+      descriptionAr: "\u0635\u064A\u0627\u063A\u0629 \u0627\u0644\u0627\u0633\u062A\u0646\u062A\u0627\u062C \u0627\u0644\u0639\u0627\u0645 \u062D\u0633\u0628 \u0627\u0644\u0645\u0642\u0631\u0631 \u0627\u0644\u0645\u063A\u0631\u0628\u064A."
+    }
+  ];
+  const mindMapBranches = outline.slice(0, 4).map((sec, idx) => ({
+    branchTitle: sec.heading.slice(0, 42),
+    branchTitleAr: sec.headingAr.slice(0, 42),
+    points: sec.keyPoints.map((p) => p.slice(0, 68)).slice(0, 2),
+    pointsAr: sec.keyPointsAr.map((p) => p.slice(0, 68)).slice(0, 2)
+  }));
+  while (mindMapBranches.length < 3) {
+    const idx = mindMapBranches.length + 1;
+    mindMapBranches.push({
+      branchTitle: idx === 2 ? "M\xE9canismes cl\xE9s" : "Points \xE0 retenir",
+      branchTitleAr: idx === 2 ? "\u0627\u0644\u0622\u0644\u064A\u0627\u062A \u0627\u0644\u0623\u0633\u0627\u0633\u064A\u0629" : "\u0646\u0642\u0637 \u0644\u0644\u062D\u0641\u0638",
+      points: [proseLines[idx - 1]?.slice(0, 68) || "D\xE9marche scientifique exp\xE9rimentale"],
+      pointsAr: [proseLines[idx - 1]?.slice(0, 68) || "\u0627\u0644\u0646\u0647\u062C \u0627\u0644\u062A\u062C\u0631\u064A\u0628\u064A \u0641\u064A \u0639\u0644\u0648\u0645 \u0627\u0644\u062D\u064A\u0627\u0629 \u0648\u0627\u0644\u0623\u0631\u0636"]
+    });
+  }
+  const summaryFr = proseLines.slice(0, 3).join(" ").slice(0, 420) || `Document p\xE9dagogique SVT (${gradeLevel}) analys\xE9 sur ${pageCount} page(s). Utilisez le chat pour poser vos questions ou g\xE9n\xE9rez une infographie de r\xE9vision.`;
+  const summaryAr = `\u062A\u062D\u0644\u064A\u0644 \u0634\u0627\u0645\u0644 \u0644\u0648\u062B\u064A\u0642\u0629 "${detectedTitle}" (${gradeLevel} \u2022 ${pageCount} \u0635\u0641\u062D\u0629). \u064A\u0645\u0643\u0646\u0643 \u0637\u0631\u062D \u0623\u064A \u0633\u0624\u0627\u0644 \u062D\u0648\u0644 \u0627\u0644\u0645\u062D\u062A\u0648\u0649 \u0623\u0648 \u062A\u0635\u062F\u064A\u0631 \u0627\u0644\u0625\u0646\u0641\u0648\u063A\u0631\u0627\u0641\u064A\u0643 \u0644\u0644\u0645\u0631\u0627\u062C\u0639\u0629.`;
+  const keyTakeaways = (proseLines.length > 0 ? proseLines.slice(0, 3) : [summaryFr]).map((line) => ({
+    fr: line.slice(0, 140),
+    ar: line.slice(0, 140)
+  }));
+  const wordCount = rawText.trim() ? rawText.trim().split(/\s+/).length : 0;
+  return {
+    title: detectedTitle,
+    titleAr: detectedTitle,
+    summaryFr,
+    summaryAr,
+    outline,
+    suggestedQuestions: [
+      {
+        fr: `R\xE9sume les points essentiels de "${detectedTitle.slice(0, 45)}" en 5 puces`,
+        ar: `\u0644\u062E\u0635 \u0623\u0647\u0645 \u0623\u0641\u0643\u0627\u0631 "${detectedTitle.slice(0, 40)}" \u0641\u064A 5 \u0646\u0642\u0637 \u0645\u0631\u0643\u0632\u0629`
+      },
+      {
+        fr: "Explique-moi les notions difficiles de ce PDF avec des exemples simples",
+        ar: "\u0627\u0634\u0631\u062D \u0644\u064A \u0627\u0644\u0645\u0641\u0627\u0647\u064A\u0645 \u0627\u0644\u0635\u0639\u0628\u0629 \u0641\u064A \u0647\u0630\u0627 \u0627\u0644\u0645\u0644\u0641 \u0628\u0623\u0645\u062B\u0644\u0629 \u0645\u0628\u0633\u0637\u0629"
+      },
+      {
+        fr: "Propose un quiz de 3 questions corrig\xE9es bas\xE9 uniquement sur ce PDF",
+        ar: "\u0627\u0642\u062A\u0631\u062D \u0627\u062E\u062A\u0628\u0627\u0631\u0627\u064B \u0645\u0646 3 \u0623\u0633\u0626\u0644\u0629 \u0645\u0639 \u0627\u0644\u062A\u0635\u062D\u064A\u062D \u0627\u0646\u0637\u0644\u0627\u0642\u0627\u064B \u0645\u0646 \u0647\u0630\u0627 \u0627\u0644\u0645\u0644\u0641"
+      },
+      {
+        fr: "Quels tableaux ou sch\xE9mas faut-il retenir pour le contr\xF4le ?",
+        ar: "\u0645\u0627 \u0647\u064A \u0627\u0644\u062C\u062F\u0627\u0648\u0644 \u0623\u0648 \u0627\u0644\u0631\u0633\u0648\u0645\u0627\u062A \u0627\u0644\u0623\u0633\u0627\u0633\u064A\u0629 \u0627\u0644\u062A\u064A \u064A\u062C\u0628 \u062D\u0641\u0638\u0647\u0627 \u0644\u0644\u0641\u0631\u0636\u061F"
+      }
+    ],
+    infographic: {
+      title: detectedTitle,
+      titleAr: detectedTitle,
+      subtitle: `Synth\xE8se Visuelle PDF \xB7 Programme SVT ${gradeLevel}`,
+      subtitleAr: `\u0645\u0644\u062E\u0635 \u0628\u0635\u0631\u064A \u0644\u0644\u0648\u062B\u064A\u0642\u0629 \xB7 \u0639\u0644\u0648\u0645 \u0627\u0644\u062D\u064A\u0627\u0629 \u0648\u0627\u0644\u0623\u0631\u0636 ${gradeLevel}`,
+      gradeLevel,
+      subjectTag: "SVT Coll\xE8ge Maroc",
+      subjectTagAr: "\u0639\u0644\u0648\u0645 \u0627\u0644\u062D\u064A\u0627\u0629 \u0648\u0627\u0644\u0623\u0631\u0636",
+      keyMetrics: [
+        {
+          value: String(pageCount),
+          label: pageCount > 1 ? "Pages analys\xE9es" : "Page analys\xE9e",
+          labelAr: "\u0639\u062F\u062F \u0627\u0644\u0635\u0641\u062D\u0627\u062A",
+          detail: "Document source PDF",
+          detailAr: "\u0627\u0644\u0648\u062B\u064A\u0642\u0629 \u0627\u0644\u0623\u0635\u0644\u064A\u0629"
+        },
+        {
+          value: String(Math.max(outline.length, 1)),
+          label: "Axes structur\xE9s",
+          labelAr: "\u0627\u0644\u0645\u062D\u0627\u0648\u0631 \u0627\u0644\u0645\u0647\u064A\u0643\u0644\u0629",
+          detail: "Plan du chapitre",
+          detailAr: "\u0647\u064A\u0643\u0644\u0629 \u0627\u0644\u062F\u0631\u0633"
+        },
+        {
+          value: String(wordCount || imageCount || 1),
+          label: wordCount > 0 ? "Mots extraits" : "Figures d\xE9tect\xE9es",
+          labelAr: wordCount > 0 ? "\u0627\u0644\u0643\u0644\u0645\u0627\u062A \u0627\u0644\u0645\u0633\u062A\u062E\u0631\u062C\u0629" : "\u0627\u0644\u0623\u0634\u0643\u0627\u0644 \u0627\u0644\u0645\u0643\u062A\u0634\u0641\u0629",
+          detail: wordCount > 0 ? "Contenu index\xE9" : "Visuels PDF",
+          detailAr: wordCount > 0 ? "\u0645\u062D\u062A\u0648\u0649 \u0645\u0641\u0647\u0631\u0633" : "\u0635\u0648\u0631 \u0627\u0644\u0648\u062B\u064A\u0642\u0629"
+        },
+        {
+          value: gradeLevel,
+          label: "Niveau cibl\xE9",
+          labelAr: "\u0627\u0644\u0645\u0633\u062A\u0648\u0649 \u0627\u0644\u062F\u0631\u0627\u0633\u064A",
+          detail: "Coll\xE8ge marocain",
+          detailAr: "\u0627\u0644\u062B\u0627\u0646\u0648\u064A \u0627\u0644\u0625\u0639\u062F\u0627\u062F\u064A"
+        }
+      ],
+      processSteps,
+      mindMapBranches,
+      comparisonTable,
+      keyTakeaways,
+      glossary
+    }
+  };
+}
+function buildFallbackPdfChatReply(rawText, question, filename, language) {
+  const isAr = language === "ar";
+  const lines = rawText.replace(/\r\n?/g, "\n").split("\n").map(cleanLine).filter((l) => l.length > 6);
+  if (lines.length === 0) {
+    return isAr ? `\u062A\u0645 \u062A\u062D\u0645\u064A\u0644 \u0627\u0644\u0645\u0644\u0641 **${filename}** \u0648\u0647\u0648 \u0639\u0628\u0627\u0631\u0629 \u0639\u0646 \u0648\u062B\u064A\u0642\u0629 \u0645\u0635\u0648\u0631\u0629/\u0645\u0645\u0633\u0648\u062D\u0629 \u0636\u0648\u0626\u064A\u0627\u064B \u0628\u062F\u0648\u0646 \u0637\u0628\u0642\u0629 \u0646\u0635\u064A\u0629 \u0642\u0627\u0628\u0644\u0629 \u0644\u0644\u0642\u0631\u0627\u0621\u0629 \u0627\u0644\u0645\u0628\u0627\u0634\u0631\u0629 \u0628\u062F\u0648\u0646 \u0645\u0641\u062A\u0627\u062D Gemini. \u064A\u0645\u0643\u0646\u0643 \u062A\u0639\u062F\u064A\u0644 \u0623\u0648 \u0625\u0636\u0627\u0641\u0629 \u0627\u0644\u0646\u0642\u0627\u0637 \u0627\u0644\u0631\u0626\u064A\u0633\u064A\u0629 \u0623\u0648 \u0627\u0633\u062A\u062E\u062F\u0627\u0645 \u0627\u0644\u0625\u0646\u0641\u0648\u063A\u0631\u0627\u0641\u064A\u0643 \u0627\u0644\u0628\u0635\u0631\u064A.` : `Le document **${filename}** semble \xEAtre un PDF scann\xE9 (sans couche texte directe). Sans connexion active au mod\xE8le multimodal, je ne peux pas lire les pixels de la page, mais vous pouvez consulter les figures extraites et personnaliser l'infographie.`;
+  }
+  const q = question.toLowerCase();
+  const tokens = q.replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter((t) => t.length >= 3);
+  if (/résum|synthes|points?\s+essentiel|تلخيص|لخص|أهم/i.test(q)) {
+    const top = lines.slice(0, 6).map((l) => `- ${l}`).join("\n");
+    return isAr ? `### \u{1F4C4} \u062E\u0644\u0627\u0635\u0629 \u0627\u0644\u0648\u062B\u064A\u0642\u0629 (${filename})
+
+\u0625\u0644\u064A\u0643 \u0623\u0628\u0631\u0632 \u0627\u0644\u0645\u0639\u0637\u064A\u0627\u062A \u0627\u0644\u0645\u0633\u062A\u062E\u0631\u062C\u0629 \u0645\u0628\u0627\u0634\u0631\u0629 \u0645\u0646 \u0645\u0644\u0641 PDF:
+
+${top}` : `### \u{1F4C4} Synth\xE8se du document (${filename})
+
+Voici les points cl\xE9s extraits directement de votre PDF :
+
+${top}`;
+  }
+  if (/quiz|question|exercice|اختبار|تمرين|أسئلة/i.test(q)) {
+    const sampleA = lines[0] || filename;
+    const sampleB = lines[1] || lines[0] || filename;
+    return isAr ? `### \u{1F3AF} \u062A\u0645\u0631\u064A\u0646 \u062A\u0641\u0627\u0639\u0644\u064A \u0627\u0646\u0637\u0644\u0627\u0642\u0627\u064B \u0645\u0646 \u0645\u0644\u0641 PDF
+
+1. **\u0633\u0624\u0627\u0644 1:** \u0627\u0634\u0631\u062D \u0627\u0644\u0641\u0643\u0631\u0629 \u0627\u0644\u0648\u0627\u0631\u062F\u0629 \u0641\u064A \u0627\u0644\u0648\u062B\u064A\u0642\u0629: *"${sampleA.slice(0, 110)}"*.
+2. **\u0633\u0624\u0627\u0644 2:** \u0645\u0627 \u0627\u0644\u0639\u0644\u0627\u0642\u0629 \u0627\u0644\u0639\u0644\u0645\u064A\u0629 \u0627\u0644\u0645\u0633\u062A\u062E\u0644\u0635\u0629 \u0645\u0646: *"${sampleB.slice(0, 110)}"*\u061F
+3. **\u0633\u0624\u0627\u0644 3:** \u0635\u063A \u0627\u0633\u062A\u0646\u062A\u0627\u062C\u0627\u064B \u0639\u0627\u0645\u0627\u064B \u064A\u0631\u0628\u0637 \u0628\u064A\u0646 \u0645\u0639\u0637\u064A\u0627\u062A \u0647\u0630\u0627 \u0627\u0644\u062F\u0631\u0633.` : `### \u{1F3AF} Auto-\xE9valuation bas\xE9e sur votre PDF
+
+1. **Question 1 :** Expliquez la notion suivante tir\xE9e du document : *"${sampleA.slice(0, 110)}"*.
+2. **Question 2 :** Quel m\xE9canisme ou relation est d\xE9crit dans : *"${sampleB.slice(0, 110)}"* ?
+3. **Question 3 :** R\xE9digez une conclusion synth\xE9tique \xE0 retenir pour le contr\xF4le.`;
+  }
+  const scored = lines.map((line) => {
+    const lower = line.toLowerCase();
+    let score = 0;
+    for (const tok of tokens) {
+      if (lower.includes(tok)) score += 2;
+    }
+    if (line.includes("|")) score += 1;
+    return { line, score };
+  }).sort((a, b) => b.score - a.score);
+  const matches = scored.filter((s) => s.score > 0).slice(0, 5).map((s) => s.line);
+  const selected = matches.length > 0 ? matches : lines.slice(0, 4);
+  if (isAr) {
+    return `### \u{1F4A1} \u0625\u062C\u0627\u0628\u0629 \u0627\u0646\u0637\u0644\u0627\u0642\u0627\u064B \u0645\u0646 \u0645\u062D\u062A\u0648\u0649 PDF (${filename})
+
+\u0628\u0646\u0627\u0621\u064B \u0639\u0644\u0649 \u0645\u0642\u0627\u0637\u0639 \u0627\u0644\u0648\u062B\u064A\u0642\u0629 \u0627\u0644\u0645\u0631\u062A\u0628\u0637\u0629 \u0628\u0633\u0624\u0627\u0644\u0643 **"${question}"**:
+
+${selected.map((s) => `- ${s}`).join("\n")}
+
+\u064A\u0645\u0643\u0646\u0643 \u0637\u0644\u0628 **\u062A\u0644\u062E\u064A\u0635 \u0634\u0627\u0645\u0644**\u060C **\u0627\u062E\u062A\u0628\u0627\u0631 \u0642\u0635\u064A\u0631**\u060C \u0623\u0648 **\u062A\u062D\u0648\u064A\u0644 \u0623\u064A \u0645\u062D\u0648\u0631 \u0625\u0644\u0649 \u0625\u0646\u0641\u0648\u063A\u0631\u0627\u0641\u064A\u0643**.`;
+  }
+  return `### \u{1F4A1} R\xE9ponse bas\xE9e sur votre PDF (${filename})
+
+Voici les passages les plus pertinents extraits du document concernant **"${question}"** :
+
+${selected.map((s) => `- ${s}`).join("\n")}
+
+Vous pouvez me demander un **r\xE9sum\xE9**, un **quiz corrig\xE9**, ou de **g\xE9n\xE9rer une infographie** cibl\xE9e sur ce passage.`;
+}
+
 // server.ts
 var require2 = createRequire(import.meta.url);
 var pdfParse = require2("pdf-parse");
@@ -914,6 +1194,336 @@ R\xE8gles :
   } catch (err) {
     console.error("Server error /api/gemini:", err);
     res.status(500).json({ error: "Erreur interne lors du traitement de la requ\xEAte." });
+  }
+});
+async function runGeminiWithTimeout(apiKey, params, timeoutMs = 18e3) {
+  const ai = new GoogleGenAI({
+    apiKey,
+    httpOptions: { headers: { "User-Agent": "aistudio-build" } }
+  });
+  const abortController = new AbortController();
+  const handle = setTimeout(() => abortController.abort(), timeoutMs);
+  try {
+    const config = { abortSignal: abortController.signal };
+    if (params.systemInstruction) config.systemInstruction = params.systemInstruction;
+    if (params.responseMimeType) config.responseMimeType = params.responseMimeType;
+    const response = await Promise.race([
+      ai.models.generateContent({
+        model: "gemini-4-hydrogen",
+        contents: params.contents,
+        config
+      }),
+      new Promise(
+        (_, reject) => setTimeout(() => reject(new Error("Gemini PDF AI timeout")), timeoutMs)
+      )
+    ]);
+    return response?.text || null;
+  } finally {
+    clearTimeout(handle);
+  }
+}
+function mergeInfographicData(base, candidate) {
+  if (!candidate || typeof candidate !== "object") return base;
+  return {
+    title: candidate.title ? String(candidate.title).slice(0, 110) : base.title,
+    titleAr: candidate.titleAr ? String(candidate.titleAr).slice(0, 110) : base.titleAr,
+    subtitle: candidate.subtitle ? String(candidate.subtitle).slice(0, 140) : base.subtitle,
+    subtitleAr: candidate.subtitleAr ? String(candidate.subtitleAr).slice(0, 140) : base.subtitleAr,
+    gradeLevel: ["1AC", "2AC", "3AC"].includes(String(candidate.gradeLevel)) ? candidate.gradeLevel : base.gradeLevel,
+    subjectTag: candidate.subjectTag ? String(candidate.subjectTag).slice(0, 50) : base.subjectTag,
+    subjectTagAr: candidate.subjectTagAr ? String(candidate.subjectTagAr).slice(0, 50) : base.subjectTagAr,
+    keyMetrics: Array.isArray(candidate.keyMetrics) && candidate.keyMetrics.length > 0 ? candidate.keyMetrics.slice(0, 4).map((m, idx) => ({
+      value: String(m?.value || base.keyMetrics[idx]?.value || "-").slice(0, 22),
+      label: String(m?.label || base.keyMetrics[idx]?.label || "Indicateur").slice(0, 45),
+      labelAr: String(m?.labelAr || m?.label || base.keyMetrics[idx]?.labelAr || "\u0645\u0624\u0634\u0631").slice(0, 45),
+      detail: String(m?.detail || base.keyMetrics[idx]?.detail || "").slice(0, 60),
+      detailAr: String(m?.detailAr || m?.detail || base.keyMetrics[idx]?.detailAr || "").slice(0, 60)
+    })) : base.keyMetrics,
+    processSteps: Array.isArray(candidate.processSteps) && candidate.processSteps.length > 0 ? candidate.processSteps.slice(0, 5).map((s, idx) => ({
+      stepNumber: idx + 1,
+      title: String(s?.title || `\xC9tape ${idx + 1}`).slice(0, 60),
+      titleAr: String(s?.titleAr || s?.title || `\u0627\u0644\u0645\u0631\u062D\u0644\u0629 ${idx + 1}`).slice(0, 60),
+      description: String(s?.description || "").slice(0, 150),
+      descriptionAr: String(s?.descriptionAr || s?.description || "").slice(0, 150)
+    })) : base.processSteps,
+    mindMapBranches: Array.isArray(candidate.mindMapBranches) && candidate.mindMapBranches.length > 0 ? candidate.mindMapBranches.slice(0, 6).map((b, idx) => ({
+      branchTitle: String(b?.branchTitle || `Axe ${idx + 1}`).slice(0, 48),
+      branchTitleAr: String(b?.branchTitleAr || b?.branchTitle || `\u0627\u0644\u0645\u062D\u0648\u0631 ${idx + 1}`).slice(0, 48),
+      points: Array.isArray(b?.points) ? b.points.slice(0, 3).map((p) => String(p).slice(0, 80)) : ["Notion cl\xE9"],
+      pointsAr: Array.isArray(b?.pointsAr) ? b.pointsAr.slice(0, 3).map((p) => String(p).slice(0, 80)) : ["\u0641\u0643\u0631\u0629 \u0623\u0633\u0627\u0633\u064A\u0629"]
+    })) : base.mindMapBranches,
+    comparisonTable: candidate.comparisonTable && Array.isArray(candidate.comparisonTable.headers) && candidate.comparisonTable.headers.length >= 2 && Array.isArray(candidate.comparisonTable.rows) && candidate.comparisonTable.rows.length > 0 ? {
+      headers: candidate.comparisonTable.headers.slice(0, 4).map((h) => String(h).slice(0, 40)),
+      headersAr: (Array.isArray(candidate.comparisonTable.headersAr) && candidate.comparisonTable.headersAr.length >= 2 ? candidate.comparisonTable.headersAr : candidate.comparisonTable.headers).slice(0, 4).map((h) => String(h).slice(0, 40)),
+      rows: candidate.comparisonTable.rows.slice(0, 5).map((r) => Array.isArray(r) ? r.slice(0, 4).map((c) => String(c).slice(0, 80)) : []),
+      rowsAr: (Array.isArray(candidate.comparisonTable.rowsAr) && candidate.comparisonTable.rowsAr.length > 0 ? candidate.comparisonTable.rowsAr : candidate.comparisonTable.rows).slice(0, 5).map((r) => Array.isArray(r) ? r.slice(0, 4).map((c) => String(c).slice(0, 80)) : [])
+    } : base.comparisonTable,
+    keyTakeaways: Array.isArray(candidate.keyTakeaways) && candidate.keyTakeaways.length > 0 ? candidate.keyTakeaways.slice(0, 4).map((k) => ({
+      fr: String(k?.fr || "").slice(0, 160),
+      ar: String(k?.ar || k?.fr || "").slice(0, 160)
+    })) : base.keyTakeaways,
+    glossary: Array.isArray(candidate.glossary) && candidate.glossary.length > 0 ? candidate.glossary.slice(0, 6).map((g) => ({
+      term: String(g?.term || "").slice(0, 60),
+      termAr: String(g?.termAr || g?.term || "").slice(0, 60),
+      definition: String(g?.definition || "").slice(0, 180),
+      definitionAr: String(g?.definitionAr || g?.definition || "").slice(0, 180)
+    })) : base.glossary
+  };
+}
+app.post("/api/pdf-ai/analyze", async (req, res) => {
+  try {
+    const rawBase64 = req.body.fileBase64 || req.body.pdfBase64;
+    const filename = req.body.filename || "document.pdf";
+    if (!rawBase64) {
+      return res.status(400).json({ error: "Fichier PDF manquant (base64 requis)." });
+    }
+    const cleanBase64 = String(rawBase64).replace(/^data:[^;]*;base64,/i, "");
+    const buffer = Buffer.from(cleanBase64, "base64");
+    let rawText = "";
+    let pageCount = 1;
+    let extractedImages = [];
+    try {
+      const pdfData = await pdfParse(buffer, {
+        pagerender: createCoordinatePageRenderer()
+      });
+      rawText = (pdfData.text || "").replace(/\r\n?/g, "\n").trim();
+      pageCount = pdfData.numpages || 1;
+    } catch (err) {
+      console.warn("PDF AI parse warning:", err?.message);
+    }
+    try {
+      extractedImages = extractImagesFromPdfBuffer(buffer, 6);
+    } catch (err) {
+      console.warn("PDF AI image extraction warning:", err?.message);
+    }
+    const compactText = rawText.replace(/\s+/g, " ").trim();
+    const isScanned = compactText.length < 15 || !/[a-zA-ZÀ-ÿ\u0600-\u06FF]{3,}/.test(compactText);
+    const fallback = buildFallbackPdfAnalysis(
+      rawText,
+      filename,
+      pageCount,
+      extractedImages.length
+    );
+    let result = fallback;
+    let source = "pdf-local-engine";
+    const apiKey = process.env.GEMINI_API_KEY;
+    const canAttachPdf = buffer.length <= 12 * 1024 * 1024;
+    if ((!isScanned || canAttachPdf) && apiKey && apiKey !== "MY_GEMINI_API_KEY" && apiKey.trim() !== "") {
+      try {
+        const prompt = `Tu es un assistant IA expert en lecture de documents PDF et en cr\xE9ation d'infographies p\xE9dagogiques bilingues (Fran\xE7ais & Arabe) pour SVT Coll\xE8ge Maroc.
+Lis attentivement ce PDF (${pageCount} page(s)) et g\xE9n\xE8re UNIQUEMENT un objet JSON valide respectant exactement cette structure :
+{
+  "title": "Titre clair du document en fran\xE7ais",
+  "titleAr": "\u0639\u0646\u0648\u0627\u0646 \u0627\u0644\u0648\u062B\u064A\u0642\u0629 \u0628\u0627\u0644\u0639\u0631\u0628\u064A\u0629",
+  "summaryFr": "R\xE9sum\xE9 structur\xE9 complet et fid\xE8le en fran\xE7ais (3-4 phrases)",
+  "summaryAr": "\u0645\u0644\u062E\u0635 \u0639\u0644\u0645\u064A \u0634\u0627\u0645\u0644 \u0628\u0627\u0644\u0639\u0631\u0628\u064A\u0629 (3-4 \u062C\u0645\u0644)",
+  "outline": [
+    {
+      "heading": "Axe / Chapitre",
+      "headingAr": "\u0627\u0644\u0645\u062D\u0648\u0631 \u0628\u0627\u0644\u0639\u0631\u0628\u064A\u0629",
+      "keyPoints": ["Point cl\xE9 1", "Point cl\xE9 2"],
+      "keyPointsAr": ["\u0641\u0643\u0631\u0629 \u0631\u0626\u064A\u0633\u064A\u0629 1", "\u0641\u0643\u0631\u0629 \u0631\u0626\u064A\u0633\u064A\u0629 2"]
+    }
+  ],
+  "suggestedQuestions": [
+    { "fr": "Question pertinente sur ce PDF ?", "ar": "\u0633\u0624\u0627\u0644 \u0645\u0647\u0645 \u062D\u0648\u0644 \u0647\u0630\u0647 \u0627\u0644\u0648\u062B\u064A\u0642\u0629\u061F" }
+  ],
+  "infographic": {
+    "title": "Titre court pour l'infographie",
+    "titleAr": "\u0639\u0646\u0648\u0627\u0646 \u0627\u0644\u0625\u0646\u0641\u0648\u063A\u0631\u0627\u0641\u064A\u0643",
+    "subtitle": "Sous-titre synth\xE9tique",
+    "subtitleAr": "\u0639\u0646\u0648\u0627\u0646 \u0641\u0631\u0639\u064A",
+    "gradeLevel": "1AC" | "2AC" | "3AC",
+    "subjectTag": "Th\xE8me SVT",
+    "subjectTagAr": "\u0645\u0648\u0636\u0648\u0639 \u0627\u0644\u062F\u0631\u0633",
+    "keyMetrics": [
+      { "value": "Chiffre/Mot cl\xE9 court", "label": "Libell\xE9", "labelAr": "\u0627\u0644\u062A\u0633\u0645\u064A\u0629", "detail": "Pr\xE9cision courte", "detailAr": "\u062A\u0648\u0636\u064A\u062D" }
+    ],
+    "processSteps": [
+      { "stepNumber": 1, "title": "\xC9tape 1", "titleAr": "\u0627\u0644\u0645\u0631\u062D\u0644\u0629 1", "description": "Explication concise (max 100 car.)", "descriptionAr": "\u0634\u0631\u062D \u0645\u0648\u062C\u0632" }
+    ],
+    "mindMapBranches": [
+      { "branchTitle": "Branche", "branchTitleAr": "\u0627\u0644\u0641\u0631\u0639", "points": ["Sous-point 1", "Sous-point 2"], "pointsAr": ["\u0639\u0646\u0635\u0631 1", "\u0639\u0646\u0635\u0631 2"] }
+    ],
+    "comparisonTable": {
+      "headers": ["Crit\xE8re", "\xC9l\xE9ment A", "\xC9l\xE9ment B"],
+      "headersAr": ["\u0627\u0644\u0645\u0639\u064A\u0627\u0631", "\u0627\u0644\u0639\u0646\u0635\u0631 \u0623", "\u0627\u0644\u0639\u0646\u0635\u0631 \u0628"],
+      "rows": [["Ligne 1", "Valeur", "Valeur"]],
+      "rowsAr": [["\u0633\u0637\u0631 1", "\u0642\u064A\u0645\u0629", "\u0642\u064A\u0645\u0629"]]
+    },
+    "keyTakeaways": [{ "fr": "Id\xE9e cl\xE9 \xE0 retenir", "ar": "\u0641\u0643\u0631\u0629 \u0623\u0633\u0627\u0633\u064A\u0629 \u0644\u0644\u062D\u0641\u0638" }],
+    "glossary": [{ "term": "Terme", "termAr": "\u0627\u0644\u0645\u0635\u0637\u0644\u062D", "definition": "D\xE9finition courte", "definitionAr": "\u062A\u0639\u0631\u064A\u0641 \u0645\u0648\u062C\u0632" }]
+  }
+}
+
+Texte pr\xE9-extrait du PDF :
+${rawText ? rawText.slice(0, 15e3) : "(PDF scann\xE9 : lis directement le document PDF joint.)"}`;
+        const parts = [];
+        if (canAttachPdf) {
+          parts.push({ inlineData: { mimeType: "application/pdf", data: cleanBase64 } });
+        }
+        parts.push({ text: prompt });
+        const jsonText = await runGeminiWithTimeout(apiKey, {
+          contents: { parts },
+          responseMimeType: "application/json"
+        });
+        if (jsonText) {
+          const parsed = JSON.parse(jsonText);
+          result = {
+            title: parsed.title ? String(parsed.title).slice(0, 140) : fallback.title,
+            titleAr: parsed.titleAr ? String(parsed.titleAr).slice(0, 140) : fallback.titleAr,
+            summaryFr: parsed.summaryFr ? String(parsed.summaryFr).slice(0, 1400) : fallback.summaryFr,
+            summaryAr: parsed.summaryAr ? String(parsed.summaryAr).slice(0, 1400) : fallback.summaryAr,
+            outline: Array.isArray(parsed.outline) && parsed.outline.length > 0 ? parsed.outline.slice(0, 8).map((o, idx) => ({
+              heading: String(o?.heading || `Section ${idx + 1}`).slice(0, 120),
+              headingAr: String(o?.headingAr || o?.heading || `\u0627\u0644\u0645\u062D\u0648\u0631 ${idx + 1}`).slice(0, 120),
+              keyPoints: Array.isArray(o?.keyPoints) ? o.keyPoints.slice(0, 4).map((p) => String(p).slice(0, 200)) : [],
+              keyPointsAr: Array.isArray(o?.keyPointsAr) ? o.keyPointsAr.slice(0, 4).map((p) => String(p).slice(0, 200)) : []
+            })) : fallback.outline,
+            suggestedQuestions: Array.isArray(parsed.suggestedQuestions) && parsed.suggestedQuestions.length > 0 ? parsed.suggestedQuestions.slice(0, 4).map((q) => ({
+              fr: String(q?.fr || "").slice(0, 160),
+              ar: String(q?.ar || q?.fr || "").slice(0, 160)
+            })) : fallback.suggestedQuestions,
+            infographic: mergeInfographicData(fallback.infographic, parsed.infographic)
+          };
+          source = "gemini-4-hydrogen";
+        }
+      } catch (geminiErr) {
+        console.warn("Gemini PDF AI analyze fallback:", geminiErr?.message);
+      }
+    }
+    return res.json({
+      success: true,
+      filename,
+      pageCount,
+      isScanned,
+      rawText: rawText.slice(0, 3e4),
+      extractedImages,
+      source,
+      ...result
+    });
+  } catch (err) {
+    console.error("Server error /api/pdf-ai/analyze:", err);
+    return res.status(500).json({ error: "Erreur lors de l'analyse IA du PDF." });
+  }
+});
+app.post("/api/pdf-ai/chat", async (req, res) => {
+  try {
+    const {
+      rawText = "",
+      pdfBase64,
+      filename = "document.pdf",
+      question,
+      history = [],
+      language = "fr",
+      gradeLevel = "3AC"
+    } = req.body;
+    if (!question || !String(question).trim()) {
+      return res.status(400).json({ error: "La question est requise." });
+    }
+    const q = String(question).trim();
+    const lang = language === "ar" ? "ar" : "fr";
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (apiKey && apiKey !== "MY_GEMINI_API_KEY" && apiKey.trim() !== "") {
+      try {
+        const cleanBase64 = pdfBase64 ? String(pdfBase64).replace(/^data:[^;]*;base64,/i, "") : "";
+        const pdfBytesLen = cleanBase64 ? Buffer.byteLength(cleanBase64, "base64") : 0;
+        const shouldAttachPdf = Boolean(cleanBase64 && pdfBytesLen > 0 && pdfBytesLen <= 8 * 1024 * 1024);
+        const recentHistory = Array.isArray(history) ? history.slice(-6).map((m) => `${m.role === "user" ? "Utilisateur" : "Assistant"}: ${String(m.content || "").slice(0, 600)}`).join("\n") : "";
+        const systemInstruction = `Tu es l'assistant IA lecteur de PDF de SVT COLL\xC8GE PRO (${gradeLevel}).
+Tu dois discuter du document "${filename}" avec pr\xE9cision et p\xE9dagogie en ${lang === "ar" ? "arabe scientifique clair (\u0627\u0644\u0644\u063A\u0629 \u0627\u0644\u0639\u0631\u0628\u064A\u0629)" : "fran\xE7ais scientifique rigoureux et clair"}.
+Appuie-toi exclusivement sur le contenu du PDF fourni (texte, tableaux et pages). Formate tes r\xE9ponses en Markdown clair (titres ###, puces -, **mots cl\xE9s**, tableaux Markdown | Col 1 | Col 2 | si utile).`;
+        const promptText = `${recentHistory ? `Historique r\xE9cent de la discussion :
+${recentHistory}
+
+` : ""}Contenu extrait du PDF (${filename}) :
+${rawText ? String(rawText).slice(0, 2e4) : "(Utilise le fichier PDF joint)"}
+
+Question de l'utilisateur :
+${q}`;
+        const parts = [];
+        if (shouldAttachPdf) {
+          parts.push({ inlineData: { mimeType: "application/pdf", data: cleanBase64 } });
+        }
+        parts.push({ text: promptText });
+        const reply = await runGeminiWithTimeout(apiKey, {
+          contents: { parts },
+          systemInstruction
+        });
+        if (reply) {
+          return res.json({ reply, source: "gemini-4-hydrogen" });
+        }
+      } catch (geminiErr) {
+        console.warn("Gemini PDF chat fallback:", geminiErr?.message);
+      }
+    }
+    const fallbackReply = buildFallbackPdfChatReply(String(rawText), q, String(filename), lang);
+    return res.json({ reply: fallbackReply, source: "pdf-local-engine" });
+  } catch (err) {
+    console.error("Server error /api/pdf-ai/chat:", err);
+    return res.status(500).json({ error: "Erreur lors de la discussion avec le PDF." });
+  }
+});
+app.post("/api/pdf-ai/infographic", async (req, res) => {
+  try {
+    const {
+      rawText = "",
+      filename = "document.pdf",
+      focusPrompt = "",
+      layout = "summary",
+      pageCount = 1,
+      imageCount = 0
+    } = req.body;
+    const fallback = buildFallbackPdfAnalysis(
+      String(rawText),
+      String(filename),
+      Number(pageCount) || 1,
+      Number(imageCount) || 0
+    ).infographic;
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (apiKey && apiKey !== "MY_GEMINI_API_KEY" && apiKey.trim() !== "") {
+      try {
+        const prompt = `G\xE9n\xE8re une infographie p\xE9dagogique structur\xE9e (JSON uniquement) \xE0 partir de ce document PDF (${filename}).
+Mode visuel cibl\xE9 : ${layout}.
+Consigne personnalis\xE9e de l'utilisateur : ${focusPrompt || "Synth\xE8se visuelle compl\xE8te et claire du cours"}.
+Renvoie UNIQUEMENT un objet JSON valide :
+{
+  "title": "Titre concis de l'infographie",
+  "titleAr": "\u0639\u0646\u0648\u0627\u0646 \u0627\u0644\u0625\u0646\u0641\u0648\u063A\u0631\u0627\u0641\u064A\u0643",
+  "subtitle": "Sous-titre explicatif",
+  "subtitleAr": "\u0639\u0646\u0648\u0627\u0646 \u0641\u0631\u0639\u064A",
+  "gradeLevel": "1AC" | "2AC" | "3AC",
+  "subjectTag": "Cat\xE9gorie",
+  "subjectTagAr": "\u0627\u0644\u062A\u0635\u0646\u064A\u0641",
+  "keyMetrics": [{ "value": "Valeur", "label": "Libell\xE9", "labelAr": "\u0627\u0644\u062A\u0633\u0645\u064A\u0629", "detail": "D\xE9tail", "detailAr": "\u062A\u0641\u0635\u064A\u0644" }],
+  "processSteps": [{ "stepNumber": 1, "title": "\xC9tape", "titleAr": "\u0645\u0631\u062D\u0644\u0629", "description": "Description concise", "descriptionAr": "\u0648\u0635\u0641" }],
+  "mindMapBranches": [{ "branchTitle": "Branche", "branchTitleAr": "\u0641\u0631\u0639", "points": ["Point 1", "Point 2"], "pointsAr": ["\u0646\u0642\u0637\u0629 1", "\u0646\u0642\u0637\u0629 2"] }],
+  "comparisonTable": { "headers": ["A", "B", "C"], "headersAr": ["\u0623", "\u0628", "\u062C"], "rows": [["1", "2", "3"]], "rowsAr": [["1", "2", "3"]] },
+  "keyTakeaways": [{ "fr": "\xC0 retenir", "ar": "\u062E\u0644\u0627\u0635\u0629" }],
+  "glossary": [{ "term": "Terme", "termAr": "\u0645\u0635\u0637\u0644\u062D", "definition": "D\xE9finition", "definitionAr": "\u062A\u0639\u0631\u064A\u0641" }]
+}
+
+Texte du PDF :
+${String(rawText).slice(0, 16e3)}`;
+        const jsonText = await runGeminiWithTimeout(apiKey, {
+          contents: prompt,
+          responseMimeType: "application/json"
+        });
+        if (jsonText) {
+          const parsed = JSON.parse(jsonText);
+          return res.json({
+            infographic: mergeInfographicData(fallback, parsed),
+            source: "gemini-4-hydrogen"
+          });
+        }
+      } catch (err) {
+        console.warn("Gemini infographic regeneration fallback:", err?.message);
+      }
+    }
+    return res.json({ infographic: fallback, source: "pdf-local-engine" });
+  } catch (err) {
+    console.error("Server error /api/pdf-ai/infographic:", err);
+    return res.status(500).json({ error: "Erreur lors de la g\xE9n\xE9ration de l'infographie." });
   }
 });
 function generateLocalSvtResponse(prompt, gradeLevel = "3AC", language = "fr", mode = "explain") {

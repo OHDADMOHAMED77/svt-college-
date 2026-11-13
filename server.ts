@@ -16,6 +16,12 @@ import {
   extractImagesFromPdfBuffer,
   type ExtractedPdfImage,
 } from './server/pdfRichExtractor';
+import {
+  buildFallbackPdfAnalysis,
+  buildFallbackPdfChatReply,
+  type PdfAiAnalysisResult,
+  type PdfInfographicData,
+} from './server/pdfAiEngine';
 
 const require = createRequire(import.meta.url);
 const pdfParse = require('pdf-parse');
@@ -316,6 +322,441 @@ Règles :
   } catch (err: any) {
     console.error('Server error /api/gemini:', err);
     res.status(500).json({ error: 'Erreur interne lors du traitement de la requête.' });
+  }
+});
+
+async function runGeminiWithTimeout(
+  apiKey: string,
+  params: {
+    contents: any;
+    systemInstruction?: string;
+    responseMimeType?: string;
+  },
+  timeoutMs = 18000
+): Promise<string | null> {
+  const ai = new GoogleGenAI({
+    apiKey,
+    httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+  });
+  const abortController = new AbortController();
+  const handle = setTimeout(() => abortController.abort(), timeoutMs);
+  try {
+    const config: any = { abortSignal: abortController.signal };
+    if (params.systemInstruction) config.systemInstruction = params.systemInstruction;
+    if (params.responseMimeType) config.responseMimeType = params.responseMimeType;
+
+    const response: any = await Promise.race([
+      ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: params.contents,
+        config,
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Gemini PDF AI timeout')), timeoutMs)
+      ),
+    ]);
+    return response?.text || null;
+  } finally {
+    clearTimeout(handle);
+  }
+}
+
+function mergeInfographicData(
+  base: PdfInfographicData,
+  candidate: Partial<PdfInfographicData> | undefined
+): PdfInfographicData {
+  if (!candidate || typeof candidate !== 'object') return base;
+  return {
+    title: candidate.title ? String(candidate.title).slice(0, 110) : base.title,
+    titleAr: candidate.titleAr ? String(candidate.titleAr).slice(0, 110) : base.titleAr,
+    subtitle: candidate.subtitle ? String(candidate.subtitle).slice(0, 140) : base.subtitle,
+    subtitleAr: candidate.subtitleAr ? String(candidate.subtitleAr).slice(0, 140) : base.subtitleAr,
+    gradeLevel: ['1AC', '2AC', '3AC'].includes(String(candidate.gradeLevel))
+      ? (candidate.gradeLevel as '1AC' | '2AC' | '3AC')
+      : base.gradeLevel,
+    subjectTag: candidate.subjectTag ? String(candidate.subjectTag).slice(0, 50) : base.subjectTag,
+    subjectTagAr: candidate.subjectTagAr ? String(candidate.subjectTagAr).slice(0, 50) : base.subjectTagAr,
+    keyMetrics:
+      Array.isArray(candidate.keyMetrics) && candidate.keyMetrics.length > 0
+        ? candidate.keyMetrics.slice(0, 4).map((m, idx) => ({
+            value: String(m?.value || base.keyMetrics[idx]?.value || '-').slice(0, 22),
+            label: String(m?.label || base.keyMetrics[idx]?.label || 'Indicateur').slice(0, 45),
+            labelAr: String(m?.labelAr || m?.label || base.keyMetrics[idx]?.labelAr || 'مؤشر').slice(0, 45),
+            detail: String(m?.detail || base.keyMetrics[idx]?.detail || '').slice(0, 60),
+            detailAr: String(m?.detailAr || m?.detail || base.keyMetrics[idx]?.detailAr || '').slice(0, 60),
+          }))
+        : base.keyMetrics,
+    processSteps:
+      Array.isArray(candidate.processSteps) && candidate.processSteps.length > 0
+        ? candidate.processSteps.slice(0, 5).map((s, idx) => ({
+            stepNumber: idx + 1,
+            title: String(s?.title || `Étape ${idx + 1}`).slice(0, 60),
+            titleAr: String(s?.titleAr || s?.title || `المرحلة ${idx + 1}`).slice(0, 60),
+            description: String(s?.description || '').slice(0, 150),
+            descriptionAr: String(s?.descriptionAr || s?.description || '').slice(0, 150),
+          }))
+        : base.processSteps,
+    mindMapBranches:
+      Array.isArray(candidate.mindMapBranches) && candidate.mindMapBranches.length > 0
+        ? candidate.mindMapBranches.slice(0, 6).map((b, idx) => ({
+            branchTitle: String(b?.branchTitle || `Axe ${idx + 1}`).slice(0, 48),
+            branchTitleAr: String(b?.branchTitleAr || b?.branchTitle || `المحور ${idx + 1}`).slice(0, 48),
+            points: Array.isArray(b?.points)
+              ? b.points.slice(0, 3).map(p => String(p).slice(0, 80))
+              : ['Notion clé'],
+            pointsAr: Array.isArray(b?.pointsAr)
+              ? b.pointsAr.slice(0, 3).map(p => String(p).slice(0, 80))
+              : ['فكرة أساسية'],
+          }))
+        : base.mindMapBranches,
+    comparisonTable:
+      candidate.comparisonTable &&
+      Array.isArray(candidate.comparisonTable.headers) &&
+      candidate.comparisonTable.headers.length >= 2 &&
+      Array.isArray(candidate.comparisonTable.rows) &&
+      candidate.comparisonTable.rows.length > 0
+        ? {
+            headers: candidate.comparisonTable.headers.slice(0, 4).map(h => String(h).slice(0, 40)),
+            headersAr: (Array.isArray(candidate.comparisonTable.headersAr) &&
+            candidate.comparisonTable.headersAr.length >= 2
+              ? candidate.comparisonTable.headersAr
+              : candidate.comparisonTable.headers
+            )
+              .slice(0, 4)
+              .map(h => String(h).slice(0, 40)),
+            rows: candidate.comparisonTable.rows
+              .slice(0, 5)
+              .map(r => (Array.isArray(r) ? r.slice(0, 4).map(c => String(c).slice(0, 80)) : [])),
+            rowsAr: (Array.isArray(candidate.comparisonTable.rowsAr) &&
+            candidate.comparisonTable.rowsAr.length > 0
+              ? candidate.comparisonTable.rowsAr
+              : candidate.comparisonTable.rows
+            )
+              .slice(0, 5)
+              .map(r => (Array.isArray(r) ? r.slice(0, 4).map(c => String(c).slice(0, 80)) : [])),
+          }
+        : base.comparisonTable,
+    keyTakeaways:
+      Array.isArray(candidate.keyTakeaways) && candidate.keyTakeaways.length > 0
+        ? candidate.keyTakeaways.slice(0, 4).map(k => ({
+            fr: String(k?.fr || '').slice(0, 160),
+            ar: String(k?.ar || k?.fr || '').slice(0, 160),
+          }))
+        : base.keyTakeaways,
+    glossary:
+      Array.isArray(candidate.glossary) && candidate.glossary.length > 0
+        ? candidate.glossary.slice(0, 6).map(g => ({
+            term: String(g?.term || '').slice(0, 60),
+            termAr: String(g?.termAr || g?.term || '').slice(0, 60),
+            definition: String(g?.definition || '').slice(0, 180),
+            definitionAr: String(g?.definitionAr || g?.definition || '').slice(0, 180),
+          }))
+        : base.glossary,
+  };
+}
+
+// 1. AI PDF Reader & Infographic Blueprint Generator
+app.post('/api/pdf-ai/analyze', async (req: Request, res: Response) => {
+  try {
+    const rawBase64 = req.body.fileBase64 || req.body.pdfBase64;
+    const filename: string = req.body.filename || 'document.pdf';
+
+    if (!rawBase64) {
+      return res.status(400).json({ error: 'Fichier PDF manquant (base64 requis).' });
+    }
+
+    const cleanBase64 = String(rawBase64).replace(/^data:[^;]*;base64,/i, '');
+    const buffer = Buffer.from(cleanBase64, 'base64');
+
+    let rawText = '';
+    let pageCount = 1;
+    let extractedImages: ExtractedPdfImage[] = [];
+
+    try {
+      const pdfData = await pdfParse(buffer, {
+        pagerender: createCoordinatePageRenderer(),
+      });
+      rawText = (pdfData.text || '').replace(/\r\n?/g, '\n').trim();
+      pageCount = pdfData.numpages || 1;
+    } catch (err: any) {
+      console.warn('PDF AI parse warning:', err?.message);
+    }
+
+    try {
+      extractedImages = extractImagesFromPdfBuffer(buffer, 6);
+    } catch (err: any) {
+      console.warn('PDF AI image extraction warning:', err?.message);
+    }
+
+    const compactText = rawText.replace(/\s+/g, ' ').trim();
+    const isScanned = compactText.length < 15 || !/[a-zA-ZÀ-ÿ\u0600-\u06FF]{3,}/.test(compactText);
+    const fallback: PdfAiAnalysisResult = buildFallbackPdfAnalysis(
+      rawText,
+      filename,
+      pageCount,
+      extractedImages.length
+    );
+
+    let result: PdfAiAnalysisResult = fallback;
+    let source = 'pdf-local-engine';
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    const canAttachPdf = buffer.length <= 12 * 1024 * 1024;
+    if ((!isScanned || canAttachPdf) && apiKey && apiKey !== 'MY_GEMINI_API_KEY' && apiKey.trim() !== '') {
+      try {
+        const prompt = `Tu es un assistant IA expert en lecture de documents PDF et en création d'infographies pédagogiques bilingues (Français & Arabe) pour SVT Collège Maroc.
+Lis attentivement ce PDF (${pageCount} page(s)) et génère UNIQUEMENT un objet JSON valide respectant exactement cette structure :
+{
+  "title": "Titre clair du document en français",
+  "titleAr": "عنوان الوثيقة بالعربية",
+  "summaryFr": "Résumé structuré complet et fidèle en français (3-4 phrases)",
+  "summaryAr": "ملخص علمي شامل بالعربية (3-4 جمل)",
+  "outline": [
+    {
+      "heading": "Axe / Chapitre",
+      "headingAr": "المحور بالعربية",
+      "keyPoints": ["Point clé 1", "Point clé 2"],
+      "keyPointsAr": ["فكرة رئيسية 1", "فكرة رئيسية 2"]
+    }
+  ],
+  "suggestedQuestions": [
+    { "fr": "Question pertinente sur ce PDF ?", "ar": "سؤال مهم حول هذه الوثيقة؟" }
+  ],
+  "infographic": {
+    "title": "Titre court pour l'infographie",
+    "titleAr": "عنوان الإنفوغرافيك",
+    "subtitle": "Sous-titre synthétique",
+    "subtitleAr": "عنوان فرعي",
+    "gradeLevel": "1AC" | "2AC" | "3AC",
+    "subjectTag": "Thème SVT",
+    "subjectTagAr": "موضوع الدرس",
+    "keyMetrics": [
+      { "value": "Chiffre/Mot clé court", "label": "Libellé", "labelAr": "التسمية", "detail": "Précision courte", "detailAr": "توضيح" }
+    ],
+    "processSteps": [
+      { "stepNumber": 1, "title": "Étape 1", "titleAr": "المرحلة 1", "description": "Explication concise (max 100 car.)", "descriptionAr": "شرح موجز" }
+    ],
+    "mindMapBranches": [
+      { "branchTitle": "Branche", "branchTitleAr": "الفرع", "points": ["Sous-point 1", "Sous-point 2"], "pointsAr": ["عنصر 1", "عنصر 2"] }
+    ],
+    "comparisonTable": {
+      "headers": ["Critère", "Élément A", "Élément B"],
+      "headersAr": ["المعيار", "العنصر أ", "العنصر ب"],
+      "rows": [["Ligne 1", "Valeur", "Valeur"]],
+      "rowsAr": [["سطر 1", "قيمة", "قيمة"]]
+    },
+    "keyTakeaways": [{ "fr": "Idée clé à retenir", "ar": "فكرة أساسية للحفظ" }],
+    "glossary": [{ "term": "Terme", "termAr": "المصطلح", "definition": "Définition courte", "definitionAr": "تعريف موجز" }]
+  }
+}
+
+Texte pré-extrait du PDF :
+${rawText ? rawText.slice(0, 15000) : '(PDF scanné : lis directement le document PDF joint.)'}`;
+
+        const parts: any[] = [];
+        if (canAttachPdf) {
+          parts.push({ inlineData: { mimeType: 'application/pdf', data: cleanBase64 } });
+        }
+        parts.push({ text: prompt });
+
+        const jsonText = await runGeminiWithTimeout(apiKey, {
+          contents: { parts },
+          responseMimeType: 'application/json',
+        });
+
+        if (jsonText) {
+          const parsed = JSON.parse(jsonText);
+          result = {
+            title: parsed.title ? String(parsed.title).slice(0, 140) : fallback.title,
+            titleAr: parsed.titleAr ? String(parsed.titleAr).slice(0, 140) : fallback.titleAr,
+            summaryFr: parsed.summaryFr ? String(parsed.summaryFr).slice(0, 1400) : fallback.summaryFr,
+            summaryAr: parsed.summaryAr ? String(parsed.summaryAr).slice(0, 1400) : fallback.summaryAr,
+            outline:
+              Array.isArray(parsed.outline) && parsed.outline.length > 0
+                ? parsed.outline.slice(0, 8).map((o: any, idx: number) => ({
+                    heading: String(o?.heading || `Section ${idx + 1}`).slice(0, 120),
+                    headingAr: String(o?.headingAr || o?.heading || `المحور ${idx + 1}`).slice(0, 120),
+                    keyPoints: Array.isArray(o?.keyPoints)
+                      ? o.keyPoints.slice(0, 4).map((p: any) => String(p).slice(0, 200))
+                      : [],
+                    keyPointsAr: Array.isArray(o?.keyPointsAr)
+                      ? o.keyPointsAr.slice(0, 4).map((p: any) => String(p).slice(0, 200))
+                      : [],
+                  }))
+                : fallback.outline,
+            suggestedQuestions:
+              Array.isArray(parsed.suggestedQuestions) && parsed.suggestedQuestions.length > 0
+                ? parsed.suggestedQuestions.slice(0, 4).map((q: any) => ({
+                    fr: String(q?.fr || '').slice(0, 160),
+                    ar: String(q?.ar || q?.fr || '').slice(0, 160),
+                  }))
+                : fallback.suggestedQuestions,
+            infographic: mergeInfographicData(fallback.infographic, parsed.infographic),
+          };
+          source = 'gemini-4-hydrogen';
+        }
+      } catch (geminiErr: any) {
+        console.warn('Gemini PDF AI analyze fallback:', geminiErr?.message);
+      }
+    }
+
+    return res.json({
+      success: true,
+      filename,
+      pageCount,
+      isScanned,
+      rawText: rawText.slice(0, 30000),
+      extractedImages,
+      source,
+      ...result,
+    });
+  } catch (err: any) {
+    console.error('Server error /api/pdf-ai/analyze:', err);
+    return res.status(500).json({ error: 'Erreur lors de l\'analyse IA du PDF.' });
+  }
+});
+
+// 2. Interactive PDF Chat Discussion Endpoint
+app.post('/api/pdf-ai/chat', async (req: Request, res: Response) => {
+  try {
+    const {
+      rawText = '',
+      pdfBase64,
+      filename = 'document.pdf',
+      question,
+      history = [],
+      language = 'fr',
+      gradeLevel = '3AC',
+    } = req.body;
+
+    if (!question || !String(question).trim()) {
+      return res.status(400).json({ error: 'La question est requise.' });
+    }
+
+    const q = String(question).trim();
+    const lang: 'fr' | 'ar' = language === 'ar' ? 'ar' : 'fr';
+    const apiKey = process.env.GEMINI_API_KEY;
+
+    if (apiKey && apiKey !== 'MY_GEMINI_API_KEY' && apiKey.trim() !== '') {
+      try {
+        const cleanBase64 = pdfBase64
+          ? String(pdfBase64).replace(/^data:[^;]*;base64,/i, '')
+          : '';
+        const pdfBytesLen = cleanBase64 ? Buffer.byteLength(cleanBase64, 'base64') : 0;
+        const shouldAttachPdf = Boolean(cleanBase64 && pdfBytesLen > 0 && pdfBytesLen <= 8 * 1024 * 1024);
+
+        const recentHistory = Array.isArray(history)
+          ? history
+              .slice(-6)
+              .map((m: any) => `${m.role === 'user' ? 'Utilisateur' : 'Assistant'}: ${String(m.content || '').slice(0, 600)}`)
+              .join('\n')
+          : '';
+
+        const systemInstruction = `Tu es l'assistant IA lecteur de PDF de SVT COLLÈGE PRO (${gradeLevel}).
+Tu dois discuter du document "${filename}" avec précision et pédagogie en ${
+          lang === 'ar' ? 'arabe scientifique clair (اللغة العربية)' : 'français scientifique rigoureux et clair'
+        }.
+Appuie-toi exclusivement sur le contenu du PDF fourni (texte, tableaux et pages). Formate tes réponses en Markdown clair (titres ###, puces -, **mots clés**, tableaux Markdown | Col 1 | Col 2 | si utile).`;
+
+        const promptText = `${
+          recentHistory ? `Historique récent de la discussion :\n${recentHistory}\n\n` : ''
+        }Contenu extrait du PDF (${filename}) :\n${
+          rawText ? String(rawText).slice(0, 20000) : '(Utilise le fichier PDF joint)'
+        }\n\nQuestion de l'utilisateur :\n${q}`;
+
+        const parts: any[] = [];
+        if (shouldAttachPdf) {
+          parts.push({ inlineData: { mimeType: 'application/pdf', data: cleanBase64 } });
+        }
+        parts.push({ text: promptText });
+
+        const reply = await runGeminiWithTimeout(apiKey, {
+          contents: { parts },
+          systemInstruction,
+        });
+
+        if (reply) {
+          return res.json({ reply, source: 'gemini-4-hydrogen' });
+        }
+      } catch (geminiErr: any) {
+        console.warn('Gemini PDF chat fallback:', geminiErr?.message);
+      }
+    }
+
+    const fallbackReply = buildFallbackPdfChatReply(String(rawText), q, String(filename), lang);
+    return res.json({ reply: fallbackReply, source: 'pdf-local-engine' });
+  } catch (err: any) {
+    console.error('Server error /api/pdf-ai/chat:', err);
+    return res.status(500).json({ error: 'Erreur lors de la discussion avec le PDF.' });
+  }
+});
+
+// 3. Custom Infographic Regeneration Endpoint
+app.post('/api/pdf-ai/infographic', async (req: Request, res: Response) => {
+  try {
+    const {
+      rawText = '',
+      filename = 'document.pdf',
+      focusPrompt = '',
+      layout = 'summary',
+      pageCount = 1,
+      imageCount = 0,
+    } = req.body;
+
+    const fallback = buildFallbackPdfAnalysis(
+      String(rawText),
+      String(filename),
+      Number(pageCount) || 1,
+      Number(imageCount) || 0
+    ).infographic;
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (apiKey && apiKey !== 'MY_GEMINI_API_KEY' && apiKey.trim() !== '') {
+      try {
+        const prompt = `Génère une infographie pédagogique structurée (JSON uniquement) à partir de ce document PDF (${filename}).
+Mode visuel ciblé : ${layout}.
+Consigne personnalisée de l'utilisateur : ${focusPrompt || 'Synthèse visuelle complète et claire du cours'}.
+Renvoie UNIQUEMENT un objet JSON valide :
+{
+  "title": "Titre concis de l'infographie",
+  "titleAr": "عنوان الإنفوغرافيك",
+  "subtitle": "Sous-titre explicatif",
+  "subtitleAr": "عنوان فرعي",
+  "gradeLevel": "1AC" | "2AC" | "3AC",
+  "subjectTag": "Catégorie",
+  "subjectTagAr": "التصنيف",
+  "keyMetrics": [{ "value": "Valeur", "label": "Libellé", "labelAr": "التسمية", "detail": "Détail", "detailAr": "تفصيل" }],
+  "processSteps": [{ "stepNumber": 1, "title": "Étape", "titleAr": "مرحلة", "description": "Description concise", "descriptionAr": "وصف" }],
+  "mindMapBranches": [{ "branchTitle": "Branche", "branchTitleAr": "فرع", "points": ["Point 1", "Point 2"], "pointsAr": ["نقطة 1", "نقطة 2"] }],
+  "comparisonTable": { "headers": ["A", "B", "C"], "headersAr": ["أ", "ب", "ج"], "rows": [["1", "2", "3"]], "rowsAr": [["1", "2", "3"]] },
+  "keyTakeaways": [{ "fr": "À retenir", "ar": "خلاصة" }],
+  "glossary": [{ "term": "Terme", "termAr": "مصطلح", "definition": "Définition", "definitionAr": "تعريف" }]
+}
+
+Texte du PDF :
+${String(rawText).slice(0, 16000)}`;
+
+        const jsonText = await runGeminiWithTimeout(apiKey, {
+          contents: prompt,
+          responseMimeType: 'application/json',
+        });
+
+        if (jsonText) {
+          const parsed = JSON.parse(jsonText);
+          return res.json({
+            infographic: mergeInfographicData(fallback, parsed),
+            source: 'gemini-4-hydrogen',
+          });
+        }
+      } catch (err: any) {
+        console.warn('Gemini infographic regeneration fallback:', err?.message);
+      }
+    }
+
+    return res.json({ infographic: fallback, source: 'pdf-local-engine' });
+  } catch (err: any) {
+    console.error('Server error /api/pdf-ai/infographic:', err);
+    return res.status(500).json({ error: 'Erreur lors de la génération de l\'infographie.' });
   }
 });
 

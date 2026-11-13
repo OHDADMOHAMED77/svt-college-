@@ -5,6 +5,7 @@ import { LessonModal } from './components/LessonModal';
 import { VirtualLab } from './components/VirtualLab';
 import { QuizCenter } from './components/QuizCenter';
 import { AiTutor } from './components/AiTutor';
+import { PdfAiStudio } from './components/PdfAiStudio';
 import { TeacherPortal } from './components/TeacherPortal';
 import { AdminCms } from './components/AdminCms';
 import { FreeSubscriptionModal } from './components/FreeSubscriptionModal';
@@ -434,6 +435,15 @@ export default function App() {
             <AiTutor
               gradeLevel={selectedGrade}
               language={language}
+              onOpenPdfStudio={() => setCurrentTab('pdf-ai')}
+            />
+          )}
+
+          {currentTab === 'pdf-ai' && (
+            <PdfAiStudio
+              gradeLevel={selectedGrade}
+              language={language}
+              lessons={lessons}
             />
           )}
 
