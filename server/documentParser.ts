@@ -2,6 +2,22 @@ import JSZip from 'jszip';
 
 export type DocumentKind = 'pdf' | 'pptx' | 'ppt';
 
+export interface ExtractedContentSection {
+  heading: string;
+  headingAr: string;
+  bodyMarkdown: string;
+  bodyMarkdownAr: string;
+  keyTakeaway?: string;
+  keyTakeawayAr?: string;
+}
+
+export interface ExtractedDefinition {
+  term: string;
+  termAr: string;
+  definition: string;
+  definitionAr: string;
+}
+
 export interface SvtExtractedMetadata {
   title: string;
   titleAr: string;
@@ -15,6 +31,8 @@ export interface SvtExtractedMetadata {
   summaryAr: string;
   objectives: string[];
   objectivesAr: string[];
+  contentSections: ExtractedContentSection[];
+  definitions: ExtractedDefinition[];
 }
 
 export interface PptxExtractionResult {
@@ -392,6 +410,8 @@ export function analyzeSvtDocumentContent(
     titleAr = 'التوالد عند الكائنات الحية';
   }
 
+  const structured = buildStructuredCourseFromText(rawText, title, titleAr);
+
   return {
     title,
     titleAr,
@@ -414,5 +434,130 @@ export function analyzeSvtDocumentContent(
       'استيعاب المفاهيم العلمية الأساسية وفق المنهاج الدراسي المغربي.',
       'استثمار معطيات الملاحظة والتجارب العلمية الواردة في الدرس.',
     ],
+    contentSections: structured.contentSections,
+    definitions: structured.definitions,
   };
+}
+
+function isSectionHeadingLine(line: string): boolean {
+  if (!line || line.length < 3 || line.length > 105) return false;
+  if (line.startsWith('|')) return false;
+  if (/^(?:[IVX]{1,4}\s*[\.\-–:]|[0-9]{1,2}(?:\.[0-9]{1,2})?\s*[\.\)\-–:]|(?:chapitre|activité|activite|partie|bilan|conclusion|introduction|expérience|experience|observation|interprétation|interpretation|résumé|resume|définition|definition|remarque|tableau)\b)/i.test(line)) {
+    return true;
+  }
+  return false;
+}
+
+export function buildStructuredCourseFromText(
+  rawText: string,
+  title: string,
+  titleAr: string
+): { contentSections: ExtractedContentSection[]; definitions: ExtractedDefinition[] } {
+  const cleanText = (rawText || '').replace(/\r\n?/g, '\n').trim();
+  if (!cleanText || cleanText.length < 20) {
+    return {
+      contentSections: [
+        {
+          heading: `1. ${title || 'Support de cours'}`,
+          headingAr: `1. ${titleAr || title || 'دعامة الدرس'}`,
+          bodyMarkdown:
+            'Consultez les figures et le document PDF ci-dessous pour suivre l\'ensemble des activités, schémas et expériences du cours.',
+          bodyMarkdownAr:
+            'راجع الصور والوثيقة المرفقة أسفله للاطلاع على أنشطة ورسومات وتجارب الدرس.',
+          keyTakeaway: 'Document PDF prêt pour l\'étude et le téléchargement.',
+          keyTakeawayAr: 'وثيقة الدرس جاهزة للمراجعة والتحميل.',
+        },
+      ],
+      definitions: [],
+    };
+  }
+
+  const lines = cleanText
+    .split('\n')
+    .map(l => l.replace(/[ \u00A0]+/g, ' ').trim())
+    .filter((l, idx, arr) => l.length > 0 || (idx > 0 && arr[idx - 1].length > 0));
+
+  const sections: ExtractedContentSection[] = [];
+  const definitions: ExtractedDefinition[] = [];
+  const seenTerms = new Set<string>();
+
+  let currentHeading = `1. ${title || 'Notions et Activités du Cours'}`;
+  let currentLines: string[] = [];
+  let currentTakeaway = '';
+
+  const flushSection = () => {
+    const body = currentLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    if (!body) return;
+    sections.push({
+      heading: currentHeading.slice(0, 140),
+      headingAr: currentHeading.slice(0, 140),
+      bodyMarkdown: body.slice(0, 6000),
+      bodyMarkdownAr: body.slice(0, 6000),
+      ...(currentTakeaway
+        ? {
+            keyTakeaway: currentTakeaway.slice(0, 350),
+            keyTakeawayAr: currentTakeaway.slice(0, 350),
+          }
+        : {}),
+    });
+    currentLines = [];
+    currentTakeaway = '';
+  };
+
+  for (const line of lines) {
+    if (/^(?:à retenir|conclusion|bilan|en résumé|remarque importante)\s*[:\-–]/i.test(line)) {
+      currentTakeaway = line.replace(/^(?:à retenir|conclusion|bilan|en résumé|remarque importante)\s*[:\-–]\s*/i, '').trim();
+      continue;
+    }
+
+    // Extract glossary definitions of the form "Mot clé : Explication..."
+    const defMatch = !line.startsWith('|') && line.match(/^([A-ZÀ-Ÿ\u0600-\u06FF][a-zA-ZÀ-ÿ\u0600-\u06FF\s'’\-]{2,36})\s*:\s*(.{18,260})$/);
+    if (defMatch && definitions.length < 15 && !isSectionHeadingLine(line)) {
+      const term = defMatch[1].trim();
+      const definition = defMatch[2].trim();
+      const key = term.toLowerCase();
+      if (!seenTerms.has(key) && !/^(page|figure|tableau|remarque|exemple|nb|source|semestre|unité|à retenir|conclusion|bilan)/i.test(term)) {
+        seenTerms.add(key);
+        definitions.push({
+          term,
+          termAr: term,
+          definition,
+          definitionAr: definition,
+        });
+      }
+    }
+
+    if (isSectionHeadingLine(line) && currentLines.join('').length > 60 && sections.length < 24) {
+      flushSection();
+      currentHeading = line;
+      continue;
+    }
+
+    if (currentLines.length === 0 && isSectionHeadingLine(line) && sections.length === 0) {
+      currentHeading = line;
+      continue;
+    }
+
+    // Format bullet prefixes cleanly
+    const normalizedLine = line.replace(/^[•▪▫◦➢►]\s*/, '- ');
+    currentLines.push(normalizedLine);
+  }
+
+  flushSection();
+
+  if (sections.length === 0) {
+    return {
+      contentSections: [
+        {
+          heading: `1. ${title || 'Contenu du cours'}`,
+          headingAr: `1. ${titleAr || title || 'محتوى الدرس'}`,
+          bodyMarkdown: cleanText.slice(0, 6000),
+          bodyMarkdownAr: cleanText.slice(0, 6000),
+        },
+      ],
+      definitions,
+    };
+  }
+
+  return { contentSections: sections, definitions };
 }

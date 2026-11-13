@@ -264,10 +264,13 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
       setPdfImportProgress(55);
 
       let result: any = null;
+      const controller = new AbortController();
+      const fetchTimeout = window.setTimeout(() => controller.abort(), 22000);
       try {
         const response = await fetch('/api/parse-document', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
           body: JSON.stringify({
             fileBase64: base64Data,
             filename: file.name
@@ -278,6 +281,8 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
         }
       } catch (parseNetworkErr) {
         console.warn('Document parser fallback triggered:', parseNetworkErr);
+      } finally {
+        window.clearTimeout(fetchTimeout);
       }
 
       setPdfImportProgress(100);
@@ -310,6 +315,26 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
       const proposedTitleAr = (extracted.titleAr || proposedTitle).trim();
       const isScanned = Boolean(!result || result.isScanned || !result.hasText);
 
+      const extractedImagesList: MediaAttachment[] = Array.isArray(result?.extractedImages)
+        ? result.extractedImages.map((img: any, idx: number) => ({
+            id: img.id || `med_img_${Date.now()}_${idx}`,
+            type: 'image' as const,
+            title: img.title || `Figure ${idx + 1} (PDF)`,
+            titleAr: img.titleAr || `رسم / صورة ${idx + 1} (PDF)`,
+            url: img.url,
+            description: img.description || 'Figure extraite du document PDF',
+          }))
+        : [];
+
+      const extractedSections =
+        Array.isArray(extracted.contentSections) && extracted.contentSections.length > 0
+          ? extracted.contentSections
+          : emptyLesson.contentSections;
+
+      const extractedDefinitions = Array.isArray(extracted.definitions)
+        ? extracted.definitions
+        : [];
+
       setPdfScannedWarning(isScanned && !extractedTitle);
 
       const newLessonData: Lesson = {
@@ -331,7 +356,9 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
         summaryAr: extracted.summaryAr || 'وثيقة درس مطابقة للمنهاج المغربي جاهزة للعرض والتحميل.',
         objectives: Array.isArray(extracted.objectives) && extracted.objectives.length > 0 ? extracted.objectives : emptyLesson.objectives,
         objectivesAr: Array.isArray(extracted.objectivesAr) && extracted.objectivesAr.length > 0 ? extracted.objectivesAr : emptyLesson.objectivesAr,
-        mediaAttachments: [docAttachment],
+        contentSections: extractedSections,
+        definitions: extractedDefinitions,
+        mediaAttachments: [...extractedImagesList, docAttachment],
         status: 'draft', // Toujours ouvert en brouillon pour validation avant publication
         isPremium: false,
         estimatedMinutes: 30
@@ -341,24 +368,27 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
       setIsEditingExisting(false);
 
       const docTypeLabel = detectedType === 'ppt' ? 'PowerPoint' : 'PDF';
+      const statsLabel = isAr
+        ? `${extractedSections.length} فقرات، ${extractedImagesList.length} صور`
+        : `${extractedSections.length} section(s), ${extractedImagesList.length} image(s)`;
 
       if (!extractedTitle) {
         setPdfAnalysisNotice(
           isAr
-            ? `✓ تم قبول وإرفاق ملف ${docTypeLabel} بنجاح بعنوان تلقائي: "${proposedTitle}". يمكنك تعديل العنوان أو النشر مباشرة.`
-            : `✓ Document ${docTypeLabel} accepté et attaché avec le titre "${proposedTitle}". Vous pouvez le modifier ou l'enregistrer directement.`
+            ? `✓ تم قبول وإرفاق ملف ${docTypeLabel} بنجاح بعنوان تلقائي: "${proposedTitle}" (${statsLabel}). يمكنك تعديل العنوان أو النشر مباشرة.`
+            : `✓ Document ${docTypeLabel} accepté avec le titre "${proposedTitle}" (${statsLabel}). Vous pouvez le modifier ou l'enregistrer directement.`
         );
       } else if (isScanned) {
         setPdfAnalysisNotice(
           isAr
-            ? `✓ تم قبول ملف ${docTypeLabel} واقتراح العنوان: "${proposedTitle}" (${newLessonData.gradeLevel}، الدورة ${newLessonData.semester}).`
-            : `✓ Document ${docTypeLabel} accepté avec le titre proposé "${proposedTitle}" (${newLessonData.gradeLevel}, Semestre ${newLessonData.semester}).`
+            ? `✓ تم قبول ملف ${docTypeLabel} واقتراح العنوان: "${proposedTitle}" (${newLessonData.gradeLevel}، الدورة ${newLessonData.semester} • ${statsLabel}).`
+            : `✓ Document ${docTypeLabel} accepté avec le titre proposé "${proposedTitle}" (${newLessonData.gradeLevel}, Semestre ${newLessonData.semester} • ${statsLabel}).`
         );
       } else {
         setPdfAnalysisNotice(
           isAr
-            ? `✓ تم استيراد وتحليل عرض/ملف ${docTypeLabel} بنجاح: "${proposedTitle}" (المستوى: ${newLessonData.gradeLevel}، الدورة: ${newLessonData.semester}). تم إعداده كمسودة للمراجعة قبل النشر.`
-            : `✓ Extraction intelligente ${docTypeLabel} réussie : Titre "${proposedTitle}" détecté (${newLessonData.gradeLevel}, Semestre ${newLessonData.semester}). Le cours est ouvert en mode brouillon pour validation avant publication.`
+            ? `✓ تم استخراج محتوى ${docTypeLabel} بنجاح: "${proposedTitle}" (${newLessonData.gradeLevel}، الدورة ${newLessonData.semester} • ${statsLabel}). تم إعداده كمسودة للمراجعة قبل النشر.`
+            : `✓ Extraction complète ${docTypeLabel} réussie : "${proposedTitle}" (${newLessonData.gradeLevel}, Semestre ${newLessonData.semester} • ${statsLabel}). Brouillon prêt pour validation.`
         );
       }
 
@@ -516,9 +546,29 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
             const finalTitle = extractedTitle || fallbackTitle;
             const isScanned = Boolean(data.isScanned || !data.hasText);
 
+            const extractedImagesList: MediaAttachment[] = Array.isArray(data.extractedImages)
+              ? data.extractedImages.map((img: any, idx: number) => ({
+                  id: img.id || `med_img_${Date.now()}_${idx}`,
+                  type: 'image' as const,
+                  title: img.title || `Figure ${idx + 1} (PDF)`,
+                  titleAr: img.titleAr || `رسم / صورة ${idx + 1} (PDF)`,
+                  url: img.url,
+                  description: img.description || 'Figure extraite du document PDF',
+                }))
+              : [];
+
             setFormData(prev => {
               const shouldReplaceFallback =
                 !prev.title.trim() || prev.title === fallbackTitle;
+              const isUntouchedSections =
+                prev.contentSections.length === 0 ||
+                (prev.contentSections.length === 1 &&
+                  prev.contentSections[0].heading === emptyLesson.contentSections[0].heading);
+              const isUntouchedDefs =
+                prev.definitions.length === 0 ||
+                (prev.definitions.length === 1 &&
+                  prev.definitions[0].term === emptyLesson.definitions[0].term);
+
               return {
                 ...prev,
                 title: shouldReplaceFallback ? finalTitle : prev.title,
@@ -533,15 +583,27 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
                 chapterTitle: prev.chapterTitle === emptyLesson.chapterTitle && data.extracted?.chapterTitle ? data.extracted.chapterTitle : prev.chapterTitle,
                 chapterTitleAr: prev.chapterTitleAr === emptyLesson.chapterTitleAr && data.extracted?.chapterTitleAr ? data.extracted.chapterTitleAr : prev.chapterTitleAr,
                 summary: prev.summary.trim() ? prev.summary : (data.extracted?.summary || prev.summary),
-                summaryAr: prev.summaryAr.trim() ? prev.summaryAr : (data.extracted?.summaryAr || prev.summaryAr)
+                summaryAr: prev.summaryAr.trim() ? prev.summaryAr : (data.extracted?.summaryAr || prev.summaryAr),
+                contentSections:
+                  isUntouchedSections && Array.isArray(data.extracted?.contentSections) && data.extracted.contentSections.length > 0
+                    ? data.extracted.contentSections
+                    : prev.contentSections,
+                definitions:
+                  isUntouchedDefs && Array.isArray(data.extracted?.definitions)
+                    ? data.extracted.definitions
+                    : prev.definitions,
+                mediaAttachments:
+                  extractedImagesList.length > 0
+                    ? [...(prev.mediaAttachments || []), ...extractedImagesList]
+                    : prev.mediaAttachments,
               };
             });
 
             setPdfScannedWarning(isScanned && !extractedTitle);
             setPdfAnalysisNotice(
               isAr
-                ? `✓ تم قبول وإرفاق ملف ${docLabel} بعنوان "${finalTitle}"`
-                : `✓ Document ${docLabel} accepté et attaché (${finalTitle}).`
+                ? `✓ تم قبول وإرفاق ملف ${docLabel} بعنوان "${finalTitle}" (${extractedImagesList.length} صور مستخرجة)`
+                : `✓ Document ${docLabel} accepté et contenu extrait (${finalTitle} • ${extractedImagesList.length} image(s)).`
             );
           }
         } catch (err) {
@@ -1437,6 +1499,16 @@ export const AdminCms: React.FC<AdminCmsProps> = ({
                               <Trash2 className="w-4 h-4" />
                             </button>
                           </div>
+
+                          {med.type === 'image' && med.url && (
+                            <div className="rounded-lg overflow-hidden bg-slate-950 border border-slate-700/80 p-2 flex items-center justify-center">
+                              <img
+                                src={med.url}
+                                alt={med.title}
+                                className="max-h-40 w-auto object-contain rounded"
+                              />
+                            </div>
+                          )}
 
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                             <input

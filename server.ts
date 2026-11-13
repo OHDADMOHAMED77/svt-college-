@@ -11,6 +11,11 @@ import {
   extractLegacyPptText,
   extractPptxContent,
 } from './server/documentParser';
+import {
+  createCoordinatePageRenderer,
+  extractImagesFromPdfBuffer,
+  type ExtractedPdfImage,
+} from './server/pdfRichExtractor';
 
 const require = createRequire(import.meta.url);
 const pdfParse = require('pdf-parse');
@@ -68,6 +73,7 @@ async function handleParseDocument(req: Request, res: Response) {
     let rawText = '';
     let pageCount = 1;
     let docInfo: { Title?: string } = {};
+    let extractedImages: ExtractedPdfImage[] = [];
 
     if (kind === 'pptx') {
       try {
@@ -88,12 +94,20 @@ async function handleParseDocument(req: Request, res: Response) {
       }
     } else {
       try {
-        const pdfData = await pdfParse(buffer);
+        const pdfData = await pdfParse(buffer, {
+          pagerender: createCoordinatePageRenderer(),
+        });
         rawText = (pdfData.text || '').replace(/\r\n?/g, '\n').trim();
         pageCount = pdfData.numpages || 1;
         docInfo = pdfData.info || {};
       } catch (parseErr: any) {
         console.warn('PDF parse warning, processing as scanned document:', parseErr?.message);
+      }
+
+      try {
+        extractedImages = extractImagesFromPdfBuffer(buffer, 10);
+      } catch (imgErr: any) {
+        console.warn('PDF embedded image extraction warning:', imgErr?.message);
       }
     }
 
@@ -102,19 +116,24 @@ async function handleParseDocument(req: Request, res: Response) {
     const hasReadableWords = /[a-zA-ZÀ-ÿ\u0600-\u06FF]{3,}/.test(compactText);
     const isScanned = compactText.length < 12 || !hasReadableWords;
 
-    // Analyze using Moroccan SVT curriculum heuristics
+    // Analyze using Moroccan SVT curriculum heuristics (including sections, Markdown tables, definitions)
     const analysis = analyzeSvtDocumentContent(rawText, filename, docInfo);
 
-    // If Gemini API is available and document contains text, refine analysis with AI
+    // If Gemini API is available, refine & structure complete course (text, tables, definitions)
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!isScanned && apiKey && apiKey !== 'MY_GEMINI_API_KEY' && apiKey.trim() !== '') {
+    const canAttachPdfMultimodal = kind === 'pdf' && buffer.length <= 12 * 1024 * 1024;
+    if ((!isScanned || canAttachPdfMultimodal) && apiKey && apiKey !== 'MY_GEMINI_API_KEY' && apiKey.trim() !== '') {
       try {
-        const ai = new GoogleGenAI({ apiKey });
+        const ai = new GoogleGenAI({
+          apiKey,
+          httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+        });
         const docLabel = kind === 'pdf' ? 'PDF' : 'PowerPoint';
         const geminiPrompt = `Tu es un inspecteur pédagogique expert de SVT au collège marocain (1AC, 2AC, 3AC).
-Analyse cet extrait de cours ${docLabel} et renvoie UNIQUEMENT un objet JSON valide avec cette structure :
+Extrais le cours complet à partir de ce document ${docLabel} en conservant fidèlement TOUT le contenu pédagogique : titres, paragraphes structurés, listes, définitions ET TOUS LES TABLEAUX (formatés en tableaux Markdown valides | Col 1 | Col 2 |).
+Renvoie UNIQUEMENT un objet JSON valide respectant exactement ce schéma :
 {
-  "title": "Titre du cours en français (court, fidèle au programme marocain)",
+  "title": "Titre du cours en français (fidèle au document)",
   "titleAr": "عنوان الدرس بالعربية حسب المقرر المغربي الرسمي",
   "gradeLevel": "1AC" ou "2AC" ou "3AC",
   "semester": 1 ou 2,
@@ -122,25 +141,67 @@ Analyse cet extrait de cours ${docLabel} et renvoie UNIQUEMENT un objet JSON val
   "themeTitleAr": "عنوان الوحدة الرسمي",
   "chapterTitle": "Titre du chapitre",
   "chapterTitleAr": "عنوان الفصل",
-  "summary": "Résumé scientifique en français (2-3 phrases)",
-  "summaryAr": "ملخص علمي باللغة العربية",
+  "summary": "Résumé scientifique fidèle en français (2-3 phrases)",
+  "summaryAr": "ملخص علمي بالعربية",
   "objectives": ["Objectif pédagogique 1", "Objectif 2"],
-  "objectivesAr": ["هدف تعلمي 1", "هدف 2"]
+  "objectivesAr": ["هدف تعلمي 1", "هدف 2"],
+  "contentSections": [
+    {
+      "heading": "1. Titre de la partie",
+      "headingAr": "1. عنوان الفقرة بالعربية",
+      "bodyMarkdown": "Contenu complet en Markdown (paragraphes, **mots clés**, listes - ..., et tableaux Markdown | Col 1 | Col 2 |\\n| --- | --- |\\n| ... | ... |)",
+      "bodyMarkdownAr": "نفس المحتوى والجدول مترجماً بدقة علمية إلى العربية",
+      "keyTakeaway": "Idée clé à retenir",
+      "keyTakeawayAr": "خلاصة مركزة للحفظ"
+    }
+  ],
+  "definitions": [
+    {
+      "term": "Terme scientifique",
+      "termAr": "المصطلح العلمي",
+      "definition": "Définition exacte",
+      "definitionAr": "التعريف العلمي بالعربية"
+    }
+  ]
 }
 
-Texte extrait du document ${docLabel} :
-${rawText.slice(0, 3500)}`;
+Texte et tableaux déjà pré-extraits du document ${docLabel} :
+${rawText ? rawText.slice(0, 14000) : '(Document scanné ou sans couche texte : lis directement le PDF joint.)'}`;
 
-        const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: geminiPrompt,
-          config: {
-            temperature: 0.2,
-            responseMimeType: 'application/json',
-          }
-        });
+        const parts: any[] = [];
+        if (canAttachPdfMultimodal) {
+          parts.push({
+            inlineData: {
+              mimeType: 'application/pdf',
+              data: cleanBase64,
+            },
+          });
+        }
+        parts.push({ text: geminiPrompt });
 
-        if (response.text) {
+        const geminiTimeoutMs = 15000;
+        const abortController = new AbortController();
+        const timeoutHandle = setTimeout(() => abortController.abort(), geminiTimeoutMs);
+        let response: any = null;
+        try {
+          response = await Promise.race([
+            ai.models.generateContent({
+              model: 'gemini-4-hydrogen',
+              contents: { parts },
+              config: {
+                responseMimeType: 'application/json',
+                abortSignal: abortController.signal,
+              },
+            }),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error('Gemini extraction timeout')), geminiTimeoutMs)
+            ),
+          ]);
+        } finally {
+          clearTimeout(timeoutHandle);
+        }
+
+        if (response?.text) {
           const parsed = JSON.parse(response.text);
           if (parsed.title) analysis.title = parsed.title;
           if (parsed.titleAr) analysis.titleAr = parsed.titleAr;
@@ -154,6 +215,30 @@ ${rawText.slice(0, 3500)}`;
           if (parsed.summaryAr) analysis.summaryAr = parsed.summaryAr;
           if (Array.isArray(parsed.objectives) && parsed.objectives.length > 0) analysis.objectives = parsed.objectives;
           if (Array.isArray(parsed.objectivesAr) && parsed.objectivesAr.length > 0) analysis.objectivesAr = parsed.objectivesAr;
+          if (Array.isArray(parsed.contentSections) && parsed.contentSections.length > 0) {
+            analysis.contentSections = parsed.contentSections
+              .filter((s: any) => s && (s.heading || s.bodyMarkdown))
+              .slice(0, 30)
+              .map((s: any, idx: number) => ({
+                heading: String(s.heading || `${idx + 1}. Partie du cours`).slice(0, 160),
+                headingAr: String(s.headingAr || s.heading || `${idx + 1}. فقرة من الدرس`).slice(0, 160),
+                bodyMarkdown: String(s.bodyMarkdown || '').slice(0, 8000),
+                bodyMarkdownAr: String(s.bodyMarkdownAr || s.bodyMarkdown || '').slice(0, 8000),
+                ...(s.keyTakeaway ? { keyTakeaway: String(s.keyTakeaway).slice(0, 400) } : {}),
+                ...(s.keyTakeawayAr ? { keyTakeawayAr: String(s.keyTakeawayAr).slice(0, 400) } : {}),
+              }));
+          }
+          if (Array.isArray(parsed.definitions) && parsed.definitions.length > 0) {
+            analysis.definitions = parsed.definitions
+              .filter((d: any) => d && d.term && d.definition)
+              .slice(0, 30)
+              .map((d: any) => ({
+                term: String(d.term).slice(0, 120),
+                termAr: String(d.termAr || d.term).slice(0, 120),
+                definition: String(d.definition).slice(0, 800),
+                definitionAr: String(d.definitionAr || d.definition).slice(0, 800),
+              }));
+          }
         }
       } catch (geminiErr: any) {
         console.warn('Gemini extraction refinement fallback:', geminiErr?.message);
@@ -169,7 +254,8 @@ ${rawText.slice(0, 3500)}`;
       pageCount,
       slideCount: kind === 'pdf' ? undefined : pageCount,
       extracted: analysis,
-      rawSnippet: rawText.slice(0, 400)
+      extractedImages,
+      rawSnippet: rawText.slice(0, 600)
     });
   } catch (err: any) {
     console.error('Server error /api/parse-document:', err);
@@ -205,13 +291,15 @@ Règles :
 
     if (apiKey && apiKey !== 'MY_GEMINI_API_KEY' && apiKey.trim() !== '') {
       try {
-        const ai = new GoogleGenAI({ apiKey });
+        const ai = new GoogleGenAI({
+          apiKey,
+          httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+        });
         const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
+          model: 'gemini-4-hydrogen',
           contents: prompt,
           config: {
             systemInstruction,
-            temperature: 0.7,
           }
         });
 

@@ -16,6 +16,169 @@ interface LessonModalProps {
   language: 'fr' | 'ar';
 }
 
+function renderInlineFormatting(text: string): React.ReactNode {
+  const tokens = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g);
+  return tokens.map((token, idx) => {
+    if (token.startsWith('**') && token.endsWith('**') && token.length > 4) {
+      return (
+        <strong key={idx} className="text-white font-semibold">
+          {token.slice(2, -2)}
+        </strong>
+      );
+    }
+    if (token.startsWith('*') && token.endsWith('*') && token.length > 2) {
+      return (
+        <em key={idx} className="text-emerald-300/90 not-italic font-medium">
+          {token.slice(1, -1)}
+        </em>
+      );
+    }
+    return <React.Fragment key={idx}>{token}</React.Fragment>;
+  });
+}
+
+function isMarkdownTableSeparator(line: string): boolean {
+  const trimmed = line.trim();
+  return /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?$/.test(trimmed);
+}
+
+function parseTableRowCells(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '');
+  return trimmed.split('|').map(c => c.trim());
+}
+
+const MarkdownCourseBody: React.FC<{ content: string; isAr: boolean }> = ({ content, isAr }) => {
+  const lines = (content || '').replace(/\r\n?/g, '\n').split('\n');
+  const blocks: React.ReactNode[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i].trim();
+
+    if (!line) {
+      i++;
+      continue;
+    }
+
+    // Markdown Table Detection (| ... | ... |)
+    if (line.includes('|')) {
+      const tableLines: string[] = [];
+      let j = i;
+      while (j < lines.length && lines[j].trim().includes('|') && lines[j].trim().length > 1) {
+        tableLines.push(lines[j].trim());
+        j++;
+      }
+
+      if (tableLines.length >= 2) {
+        const hasSep = isMarkdownTableSeparator(tableLines[1]);
+        const headers = parseTableRowCells(tableLines[0]);
+        const bodyRows = tableLines
+          .slice(hasSep ? 2 : 1)
+          .filter(r => !isMarkdownTableSeparator(r))
+          .map(parseTableRowCells);
+
+        if (headers.length >= 2) {
+          blocks.push(
+            <div
+              key={`tbl-${i}`}
+              className="overflow-x-auto my-3 rounded-xl border border-slate-700/80 bg-slate-900/80 shadow-inner"
+            >
+              <table className={`w-full border-collapse text-xs sm:text-sm ${isAr ? 'text-right' : 'text-left'}`}>
+                <thead>
+                  <tr className="bg-emerald-950/60 border-b border-slate-700 text-emerald-300">
+                    {headers.map((h, hIdx) => (
+                      <th key={hIdx} className="px-3.5 py-2.5 font-bold whitespace-nowrap">
+                        {renderInlineFormatting(h)}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/80 text-slate-200">
+                  {bodyRows.map((row, rIdx) => (
+                    <tr key={rIdx} className="hover:bg-slate-800/50 transition-colors">
+                      {headers.map((_, cIdx) => (
+                        <td key={cIdx} className="px-3.5 py-2.5 align-top leading-relaxed">
+                          {renderInlineFormatting(row[cIdx] || '')}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          );
+          i = j;
+          continue;
+        }
+      }
+    }
+
+    // Subheadings (### or ####)
+    if (/^#{2,4}\s+/.test(line)) {
+      const headingText = line.replace(/^#{2,4}\s+/, '').trim();
+      blocks.push(
+        <h4 key={`h-${i}`} className="text-sm sm:text-base font-bold text-emerald-300 pt-2">
+          {renderInlineFormatting(headingText)}
+        </h4>
+      );
+      i++;
+      continue;
+    }
+
+    // Bullet list items (- ... or * ...)
+    if (/^[-*•]\s+/.test(line)) {
+      const listItems: string[] = [];
+      let j = i;
+      while (j < lines.length && /^[-*•]\s+/.test(lines[j].trim())) {
+        listItems.push(lines[j].trim().replace(/^[-*•]\s+/, ''));
+        j++;
+      }
+      blocks.push(
+        <ul key={`ul-${i}`} className="space-y-1.5 ps-4 list-disc marker:text-emerald-400">
+          {listItems.map((item, idx) => (
+            <li key={idx} className="text-sm text-slate-300 leading-relaxed">
+              {renderInlineFormatting(item)}
+            </li>
+          ))}
+        </ul>
+      );
+      i = j;
+      continue;
+    }
+
+    // Numbered list items (1. ...)
+    if (/^\d+\.\s+/.test(line)) {
+      const listItems: string[] = [];
+      let j = i;
+      while (j < lines.length && /^\d+\.\s+/.test(lines[j].trim())) {
+        listItems.push(lines[j].trim().replace(/^\d+\.\s+/, ''));
+        j++;
+      }
+      blocks.push(
+        <ol key={`ol-${i}`} className="space-y-1.5 ps-5 list-decimal marker:text-emerald-400 marker:font-bold">
+          {listItems.map((item, idx) => (
+            <li key={idx} className="text-sm text-slate-300 leading-relaxed">
+              {renderInlineFormatting(item)}
+            </li>
+          ))}
+        </ol>
+      );
+      i = j;
+      continue;
+    }
+
+    // Standard paragraph
+    blocks.push(
+      <p key={`p-${i}`} className="text-sm text-slate-300 leading-relaxed">
+        {renderInlineFormatting(line)}
+      </p>
+    );
+    i++;
+  }
+
+  return <div className="space-y-2.5">{blocks}</div>;
+};
+
 export const LessonModal: React.FC<LessonModalProps> = ({
   lesson,
   onClose,
@@ -137,9 +300,10 @@ export const LessonModal: React.FC<LessonModalProps> = ({
                   {isAr ? sec.headingAr : sec.heading}
                 </h3>
 
-                <div className="text-sm text-slate-300 leading-relaxed whitespace-pre-line">
-                  {isAr ? sec.bodyMarkdownAr : sec.bodyMarkdown}
-                </div>
+                <MarkdownCourseBody
+                  content={isAr ? sec.bodyMarkdownAr : sec.bodyMarkdown}
+                  isAr={isAr}
+                />
 
                 {(sec.keyTakeaway || sec.keyTakeawayAr) && (
                   <div className="bg-emerald-500/10 border-l-4 rtl:border-l-0 rtl:border-r-4 border-emerald-500 p-3 rounded-r-xl rtl:rounded-r-none rtl:rounded-l-xl text-xs text-emerald-300 font-medium">
@@ -266,60 +430,121 @@ export const LessonModal: React.FC<LessonModalProps> = ({
             </div>
           )}
 
-          {/* Attached Media (PDF, PPT, Images, Videos) */}
-          {lesson.mediaAttachments && lesson.mediaAttachments.length > 0 && (
-            <div className="space-y-3">
-              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
-                {isAr ? 'الموارد والوثائق الملحقة' : 'Documents & Ressources Attachés'}
-              </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {lesson.mediaAttachments.map((med, idx) => {
-                  const isPpt = med.type === 'ppt';
-                  const isPdf = med.type === 'pdf';
-                  const safeName = (med.title || 'cours').replace(/[^\w\u00C0-\u017F-]+/g, '_');
-                  const downloadName = isPpt
-                    ? `${safeName}.${med.url.includes('presentationml') ? 'pptx' : 'ppt'}`
-                    : isPdf
-                    ? `${safeName}.pdf`
-                    : undefined;
+          {/* Attached Media (Extracted Images/Figures + PDF, PPT, Videos) */}
+          {lesson.mediaAttachments && lesson.mediaAttachments.length > 0 && (() => {
+            const imageAttachments = lesson.mediaAttachments.filter(
+              m => m.type === 'image' && m.url
+            );
+            const docAttachments = lesson.mediaAttachments.filter(
+              m => !(m.type === 'image' && m.url)
+            );
 
-                  return (
-                    <div key={idx} className="bg-slate-800/80 border border-slate-700 p-3.5 rounded-xl flex items-center justify-between gap-3">
-                      <div className="space-y-0.5 min-w-0">
-                        <span
-                          className={`text-[10px] font-bold uppercase ${
-                            isPpt ? 'text-orange-400' : isPdf ? 'text-rose-400' : 'text-cyan-400'
-                          }`}
+            return (
+              <div className="space-y-5">
+                {imageAttachments.length > 0 && (
+                  <div className="space-y-3">
+                    <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                      {isAr ? 'الصور والرسوم التوضيحية للدرس' : 'Images, Figures & Schémas du Cours'}
+                    </h3>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {imageAttachments.map((img, idx) => (
+                        <div
+                          key={img.id || idx}
+                          className="bg-slate-800/70 border border-slate-700 rounded-2xl overflow-hidden flex flex-col"
                         >
-                          {isPpt ? 'POWERPOINT (PPT / PPTX)' : med.type}
-                        </span>
-                        <h4 className="text-xs font-bold text-white truncate">
-                          {isAr ? (med.titleAr || med.title) : med.title}
-                        </h4>
-                        {med.description && (
-                          <p className="text-[11px] text-slate-400 truncate">{med.description}</p>
-                        )}
-                      </div>
-                      <a
-                        href={med.url}
-                        target={isPpt ? undefined : '_blank'}
-                        rel={isPpt ? undefined : 'noopener noreferrer'}
-                        download={downloadName}
-                        className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold shrink-0 inline-flex items-center gap-1 ${
-                          isPpt
-                            ? 'bg-orange-500/20 hover:bg-orange-500/30 text-orange-300'
-                            : 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300'
-                        }`}
-                      >
-                        <span>{isPpt ? (isAr ? 'تحميل PPT' : 'Télécharger') : (isAr ? 'فتح' : 'Ouvrir')}</span>
-                        <ExternalLink className="w-3.5 h-3.5" />
-                      </a>
+                          <button
+                            type="button"
+                            onClick={() => setLightboxImage(img.url)}
+                            className="relative bg-slate-950 p-3 flex items-center justify-center group cursor-zoom-in"
+                          >
+                            <img
+                              src={img.url}
+                              alt={isAr ? (img.titleAr || img.title) : img.title}
+                              className="max-h-56 w-full object-contain rounded-lg transition-transform duration-200 group-hover:scale-[1.02]"
+                            />
+                            <span className="absolute bottom-2 right-2 px-2 py-1 rounded-lg bg-slate-900/90 border border-slate-700 text-[10px] font-semibold text-emerald-300 inline-flex items-center gap-1">
+                              <Eye className="w-3 h-3" />
+                              {isAr ? 'تكبير' : 'Agrandir'}
+                            </span>
+                          </button>
+                          <div className="p-3 border-t border-slate-700/80 flex items-center justify-between gap-2">
+                            <div className="min-w-0">
+                              <h4 className="text-xs font-bold text-white truncate">
+                                {isAr ? (img.titleAr || img.title) : img.title}
+                              </h4>
+                              {img.description && (
+                                <p className="text-[11px] text-slate-400 truncate">{img.description}</p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                  );
-                })}
+                  </div>
+                )}
+
+                {docAttachments.length > 0 && (
+                  <div className="space-y-3">
+                    <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                      {isAr ? 'الموارد والوثائق الملحقة' : 'Documents & Ressources Attachés'}
+                    </h3>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {docAttachments.map((med, idx) => {
+                        const isPpt = med.type === 'ppt';
+                        const isPdf = med.type === 'pdf';
+                        const safeName = (med.title || 'cours').replace(/[^\w\u00C0-\u017F-]+/g, '_');
+                        const downloadName = isPpt
+                          ? `${safeName}.${med.url.includes('presentationml') ? 'pptx' : 'ppt'}`
+                          : isPdf
+                          ? `${safeName}.pdf`
+                          : undefined;
+
+                        return (
+                          <div key={med.id || idx} className="bg-slate-800/80 border border-slate-700 p-3.5 rounded-xl flex items-center justify-between gap-3">
+                            <div className="space-y-0.5 min-w-0">
+                              <span
+                                className={`text-[10px] font-bold uppercase ${
+                                  isPpt ? 'text-orange-400' : isPdf ? 'text-rose-400' : 'text-cyan-400'
+                                }`}
+                              >
+                                {isPpt ? 'POWERPOINT (PPT / PPTX)' : med.type}
+                              </span>
+                              <h4 className="text-xs font-bold text-white truncate">
+                                {isAr ? (med.titleAr || med.title) : med.title}
+                              </h4>
+                              {med.description && (
+                                <p className="text-[11px] text-slate-400 truncate">{med.description}</p>
+                              )}
+                            </div>
+                            {med.url ? (
+                              <a
+                                href={med.url}
+                                target={isPpt ? undefined : '_blank'}
+                                rel={isPpt ? undefined : 'noopener noreferrer'}
+                                download={downloadName}
+                                className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold shrink-0 inline-flex items-center gap-1 ${
+                                  isPpt
+                                    ? 'bg-orange-500/20 hover:bg-orange-500/30 text-orange-300'
+                                    : 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300'
+                                }`}
+                              >
+                                <span>{isPpt ? (isAr ? 'تحميل PPT' : 'Télécharger') : (isAr ? 'فتح' : 'Ouvrir')}</span>
+                                <ExternalLink className="w-3.5 h-3.5" />
+                              </a>
+                            ) : (
+                              <span className="text-[11px] text-slate-500 shrink-0">
+                                {isAr ? 'ملف محلي' : 'Local'}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Attached Embedded Exercises */}
           {lesson.embeddedExercises && lesson.embeddedExercises.length > 0 && (

@@ -85,18 +85,25 @@ export function prepareLessonForFirestore(lesson: Lesson): {
   let strippedLargeAttachment = false;
 
   if (serializedSize > SAFE_FIRESTORE_DOC_BYTES && normalized.mediaAttachments) {
-    normalized.mediaAttachments = normalized.mediaAttachments.map(att => {
-      if (att.url && att.url.startsWith('data:') && att.url.length > 200 * 1024) {
+    // Strip largest inline data URI attachments first (e.g., original PDF > 200KB) so smaller extracted images remain synced
+    const indexedBySize = normalized.mediaAttachments
+      .map((att, index) => ({ index, size: att.url?.startsWith('data:') ? att.url.length : 0 }))
+      .filter(entry => entry.size > 0)
+      .sort((a, b) => b.size - a.size);
+
+    for (const entry of indexedBySize) {
+      if (serializedSize <= SAFE_FIRESTORE_DOC_BYTES) break;
+      const att = normalized.mediaAttachments[entry.index];
+      if (att.url && att.url.startsWith('data:') && (att.url.length > 200 * 1024 || serializedSize > SAFE_FIRESTORE_DOC_BYTES)) {
         strippedLargeAttachment = true;
-        return {
+        normalized.mediaAttachments[entry.index] = {
           ...att,
           url: '',
           description: `${att.description || att.title} (Fichier local volumineux > 800 Ko)`,
         };
+        serializedSize = JSON.stringify(normalized).length;
       }
-      return att;
-    });
-    serializedSize = JSON.stringify(normalized).length;
+    }
   }
 
   return { lesson: normalized, strippedLargeAttachment };
